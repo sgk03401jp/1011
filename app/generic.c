@@ -14,18 +14,21 @@
  *     limitations under the License.
  */
 
+#include <string.h>
+
 #include "app/app.h"
+#include "app/chFrScanner.h"
+#include "app/common.h"
+
 #ifdef ENABLE_FMRADIO
 	#include "app/fm.h"
 #endif
+
 #include "app/generic.h"
 #include "app/menu.h"
-#include "app/search.h"
+#include "app/scanner.h"
 #include "audio.h"
 #include "driver/keyboard.h"
-#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-	#include "driver/uart.h"
-#endif
 #include "dtmf.h"
 #include "external/printf/printf.h"
 #include "functions.h"
@@ -34,105 +37,107 @@
 #include "ui/inputbox.h"
 #include "ui/ui.h"
 
-void GENERIC_Key_F(bool key_pressed, bool key_held)
+void GENERIC_Key_F(bool bKeyPressed, bool bKeyHeld)
 {
-	g_key_input_count_down = key_input_timeout_500ms;
-
-	if (g_input_box_index > 0)
+	if (gInputBoxIndex > 0)
 	{
-		#ifdef ENABLE_FMRADIO
-			if (!g_fm_radio_mode)
-		#endif
-				if (!key_held && key_pressed)
-					g_beep_to_play = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+		if (!bKeyHeld && bKeyPressed) // short pressed
+			gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
 		return;
 	}
 
-	if (key_held)
-	{	// f-key held
+	if (bKeyHeld || !bKeyPressed) // held or released
+	{
+		if (bKeyHeld || bKeyPressed) // held or pressed (cannot be held and not pressed I guess, so it checks only if HELD?)
+		{
+			if (!bKeyHeld) // won't ever pass
+				return;
 
-		#ifdef ENABLE_KEYLOCK
-		if (key_pressed && g_current_display_screen != DISPLAY_MENU && g_current_function != FUNCTION_TRANSMIT)
-		{	// toggle the keyboad lock
+			if (!bKeyPressed) // won't ever pass
+				return;
 
-			#ifdef ENABLE_VOICE
-				g_another_voice_id = g_eeprom.config.setting.key_lock ? VOICE_ID_UNLOCK : VOICE_ID_LOCK;
+			COMMON_KeypadLockToggle();
+		}
+		else // released
+		{
+			#ifdef ENABLE_FMRADIO
+				if ((gFmRadioMode || gScreenToDisplay != DISPLAY_MAIN) && gScreenToDisplay != DISPLAY_FM)
+					return;
+			#else
+				if (gScreenToDisplay != DISPLAY_MAIN)
+					return;
 			#endif
 
-			g_eeprom.config.setting.key_lock = (g_eeprom.config.setting.key_lock + 1) & 1u;
-			g_request_save_settings = true;
-			g_update_status         = true;
+			gWasFKeyPressed = !gWasFKeyPressed; // toggle F function
 
-			// keypad is locked, tell the user
-			g_keypad_locked  = 4;      // 2 second pop-up
-			g_update_display = true;
+			if (gWasFKeyPressed)
+				gKeyInputCountdown = key_input_timeout_500ms;
+
+			#ifdef ENABLE_VOICE
+				if (!gWasFKeyPressed)
+					gAnotherVoiceID = VOICE_ID_CANCEL;
+			#endif
+
+			gUpdateStatus = true;
 		}
-		#endif
-		
-		return;
 	}
-
-	if (key_pressed)
+	else // short pressed
 	{
+#ifdef ENABLE_FMRADIO
+		if (gScreenToDisplay != DISPLAY_FM)
+#endif
+		{
+			gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+			return;
+		}
+
 		#ifdef ENABLE_FMRADIO
-			if (!g_fm_radio_mode)
+			if (gFM_ScanState == FM_SCAN_OFF) // not scanning
+			{
+				gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+				return;
+			}
 		#endif
-				g_beep_to_play = BEEP_1KHZ_60MS_OPTIONAL;
-		return;
+
+		gBeepToPlay     = BEEP_440HZ_500MS;
+
+		gPttWasReleased = true;
 	}
-
-	if (g_current_function == FUNCTION_TRANSMIT)
-		return;
-	
-	// toggle the f-key flag
-	g_fkey_pressed = !g_fkey_pressed;
-
-	#ifdef ENABLE_VOICE
-		if (!g_fkey_pressed)
-			g_another_voice_id = VOICE_ID_CANCEL;
-	#endif
-
-	g_update_status = true;
 }
 
-void GENERIC_Key_PTT(bool key_pressed)
+void GENERIC_Key_PTT(bool bKeyPressed)
 {
-	g_input_box_index = 0;
+	gInputBoxIndex = 0;
 
-#if defined(ENABLE_UART)
-	if (!key_pressed || g_serial_config_tick_500ms > 0)
-#else
-	if (!key_pressed)
-#endif
+	if (!bKeyPressed || SerialConfigInProgress())
 	{	// PTT released
-
-		if (g_current_function == FUNCTION_TRANSMIT)
+		if (gCurrentFunction == FUNCTION_TRANSMIT)
 		{	// we are transmitting .. stop
 
-			if (g_flag_end_tx)
+			if (gFlagEndTransmission)
 			{
 				FUNCTION_Select(FUNCTION_FOREGROUND);
 			}
 			else
 			{
-				APP_end_tx();
+				APP_EndTransmission();
 
-				if (g_eeprom.config.setting.repeater_tail_tone_elimination == 0)
+				if (gEeprom.REPEATER_TAIL_TONE_ELIMINATION == 0)
 					FUNCTION_Select(FUNCTION_FOREGROUND);
 				else
-					g_rtte_count_down = g_eeprom.config.setting.repeater_tail_tone_elimination * 10;
+					gRTTECountdown = gEeprom.REPEATER_TAIL_TONE_ELIMINATION * 10;
 			}
 
-			g_flag_end_tx = false;
+			gFlagEndTransmission = false;
 
 			#ifdef ENABLE_VOX
-				g_vox_audio_detected = false;
+				gVOX_NoiseDetected = false;
 			#endif
 
-			RADIO_set_vfo_state(VFO_STATE_NORMAL);
+			RADIO_SetVfoState(VFO_STATE_NORMAL);
 
-			if (g_current_display_screen != DISPLAY_MENU)     // 1of11 .. don't close the menu
-				g_request_display_screen = DISPLAY_MAIN;
+			if (gScreenToDisplay != DISPLAY_MENU)     // 1of11 .. don't close the menu
+				gRequestDisplayScreen = DISPLAY_MAIN;
 		}
 
 		return;
@@ -140,121 +145,102 @@ void GENERIC_Key_PTT(bool key_pressed)
 
 	// PTT pressed
 
-	#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//		UART_printf("gene key 1 %u\r\n", key_pressed);
-	#endif
 
-	if (g_scan_state_dir != SCAN_STATE_DIR_OFF      ||   // freq/chan scanning
-	    g_current_display_screen == DISPLAY_SEARCH  ||   // CTCSS/CDCSS scanning
-	    g_css_scan_mode != CSS_SCAN_MODE_OFF)            //   "     "
-	{	// we're scanning .. stop
-
-		if (g_current_display_screen == DISPLAY_SEARCH)
-		{	// CTCSS/CDCSS scanning .. stop
-			g_eeprom.config.setting.cross_vfo = g_backup_cross_vfo;
-			g_search_flag_stop_scan  = true;
-			g_vfo_configure_mode     = VFO_CONFIGURE_RELOAD;
-			g_flag_reset_vfos        = true;
-		}
-		else
-		if (g_scan_state_dir != SCAN_STATE_DIR_OFF)
-		{	// freq/chan scanning . .stop
-			APP_stop_scan();
-			g_request_display_screen = DISPLAY_MAIN;
-		}
-		else
-		if (g_css_scan_mode != CSS_SCAN_MODE_OFF)
-		{	// CTCSS/CDCSS scanning .. stop
-			MENU_stop_css_scan();
-
-			#ifdef ENABLE_VOICE
-				g_another_voice_id = VOICE_ID_SCANNING_STOP;
-			#endif
-		}
-
+	if (SCANNER_IsScanning())
+	{	// CTCSS/CDCSS scanning .. stop
+		SCANNER_Stop();
 		goto cancel_tx;
 	}
 
-	#ifdef ENABLE_FMRADIO
-		if (g_fm_scan_state_dir != FM_SCAN_STATE_DIR_OFF)
-		{	// FM radio is scanning .. stop
-			FM_stop_scan();
-			#ifdef ENABLE_VOICE
-				g_another_voice_id = VOICE_ID_SCANNING_STOP;
-			#endif
-			g_request_display_screen = DISPLAY_FM;
-			goto cancel_tx;
-		}
+	if (gScanStateDir != SCAN_OFF)
+	{	// frequency/channel scanning . .stop
+		CHFRSCANNER_Stop();
+		goto cancel_tx;
+	}
 
-		if (g_current_display_screen == DISPLAY_FM)
-			goto start_tx;	// listening to the FM radio .. start TX'ing
-	#endif
 
-	if (g_current_function == FUNCTION_TRANSMIT && g_rtte_count_down == 0)
+
+#ifdef ENABLE_FMRADIO
+	if (gFM_ScanState != FM_SCAN_OFF)
+	{	// FM radio is scanning .. stop
+		FM_PlayAndUpdate();
+		#ifdef ENABLE_VOICE
+			gAnotherVoiceID = VOICE_ID_SCANNING_STOP;
+		#endif
+		gRequestDisplayScreen = DISPLAY_FM;
+		goto cancel_tx;
+	}
+#endif
+
+#ifdef ENABLE_FMRADIO
+	if (gScreenToDisplay == DISPLAY_FM)
+		goto start_tx;	// listening to the FM radio .. start TX'ing
+#endif
+
+	if (gCurrentFunction == FUNCTION_TRANSMIT && gRTTECountdown == 0)
 	{	// already transmitting
-		g_input_box_index = 0;
+		gInputBoxIndex = 0;
 		return;
 	}
 
-	if (g_current_display_screen != DISPLAY_MENU)     // 1of11 .. don't close the menu
-		g_request_display_screen = DISPLAY_MAIN;
+	if (gScreenToDisplay != DISPLAY_MENU)     // 1of11 .. don't close the menu
+		gRequestDisplayScreen = DISPLAY_MAIN;
 
-	if (!g_dtmf_input_mode && g_dtmf_input_box_index == 0)
+
+	if (!gDTMF_InputMode && gDTMF_InputBox_Index == 0)
 		goto start_tx;	// wasn't entering a DTMF code .. start TX'ing (maybe)
 
 	// was entering a DTMF string
 
-	if (g_dtmf_input_box_index > 0 || g_dtmf_prev_index > 0)
+	if (gDTMF_InputBox_Index > 0 || gDTMF_PreviousIndex > 0)
 	{	// going to transmit a DTMF string
 
-		if (g_dtmf_input_box_index == 0 && g_dtmf_prev_index > 0)
-			g_dtmf_input_box_index = g_dtmf_prev_index;           // use the previous DTMF string
+		if (gDTMF_InputBox_Index == 0 && gDTMF_PreviousIndex > 0)
+			gDTMF_InputBox_Index = gDTMF_PreviousIndex;           // use the previous DTMF string
 
-		if (g_dtmf_input_box_index < sizeof(g_dtmf_input_box))
-			g_dtmf_input_box[g_dtmf_input_box_index] = 0;             // NULL term the string
+		if (gDTMF_InputBox_Index < sizeof(gDTMF_InputBox))
+			gDTMF_InputBox[gDTMF_InputBox_Index] = 0;             // NULL term the string
 
-		#if 1
-			// append our DTMF ID to the inputted DTMF code -
-			//  IF the user inputted code is exactly 3 digits long
-			if (g_dtmf_input_box_index == 3)
-				g_dtmf_call_mode = DTMF_CheckGroupCall(g_dtmf_input_box, 3);
-			else
-				g_dtmf_call_mode = DTMF_CALL_MODE_DTMF;
-		#else
-			// append our DTMF ID to the inputted DTMF code -
-			//  IF the user inputted code is exactly 3 digits long and D-DCD is enabled
-			if (g_dtmf_input_box_index == 3 && g_tx_vfo->channel.dtmf_decoding_enable > 0)
-				g_dtmf_call_mode = DTMF_CheckGroupCall(g_dtmf_input_box, 3);
-			else
-				g_dtmf_call_mode = DTMF_CALL_MODE_DTMF;
-		#endif
+#ifdef ENABLE_DTMF_CALLING
+		// append our DTMF ID to the inputted DTMF code -
+		//  IF the user inputted code is exactly 3 digits long and D-DCD is enabled
+		if (gDTMF_InputBox_Index == 3 && gTxVfo->DTMF_DECODING_ENABLE > 0)
+			gDTMF_CallMode = DTMF_CheckGroupCall(gDTMF_InputBox, 3);
+		else
+			gDTMF_CallMode = DTMF_CALL_MODE_DTMF;
 
+		gDTMF_State      = DTMF_STATE_0;
+#endif
 		// remember the DTMF string
-		g_dtmf_prev_index = g_dtmf_input_box_index;
-		strcpy(g_dtmf_string, g_dtmf_input_box);
-
-		g_dtmf_reply_state = DTMF_REPLY_ANI;
-		g_dtmf_state       = DTMF_STATE_0;
-
-		#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//			UART_printf("generic ptt tx %s\r\n", g_dtmf_string);
-		#endif
+		gDTMF_PreviousIndex = gDTMF_InputBox_Index;
+		strcpy(gDTMF_String, gDTMF_InputBox);
+		gDTMF_ReplyState = DTMF_REPLY_ANI;
 	}
 
 	DTMF_clear_input_box();
 
 start_tx:
 	// request start TX
-	g_flag_prepare_tx = true;
+	gFlagPrepareTX = true;
 	goto done;
 
 cancel_tx:
-	g_ptt_was_pressed = true;
+	if (gPttIsPressed)
+	{
+		gPttWasPressed = true;
+	}
 
 done:
-	g_ptt_debounce = 0;
-	if (g_current_display_screen != DISPLAY_MENU && g_request_display_screen != DISPLAY_FM)     // 1of11 .. don't close the menu
-		g_request_display_screen = DISPLAY_MAIN;
-	g_update_status  = true;
-	g_update_display = true;
+	gPttDebounceCounter = 0;
+	if (gScreenToDisplay != DISPLAY_MENU
+#ifdef ENABLE_FMRADIO
+		&& gRequestDisplayScreen != DISPLAY_FM
+#endif
+	) {
+		// 1of11 .. don't close the menu
+		gRequestDisplayScreen = DISPLAY_MAIN;
+	}
+
+	gUpdateStatus  = true;
+	gUpdateDisplay = true;
 }

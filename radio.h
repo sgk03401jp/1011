@@ -20,42 +20,152 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "dcs.h"
 #include "frequencies.h"
-#include "settings.h"
 
-extern vfo_info_t      g_vfo_info[2];
+enum {
+	RADIO_CHANNEL_UP   = 0x01u,
+	RADIO_CHANNEL_DOWN = 0xFFu,
+};
 
-extern vfo_info_t     *g_tx_vfo;
-extern vfo_info_t     *g_rx_vfo;
-extern vfo_info_t     *g_current_vfo;
+enum {
+	BANDWIDTH_WIDE = 0,
+	BANDWIDTH_NARROW
+};
 
-extern dcs_code_type_t g_selected_code_type;
-extern dcs_code_type_t g_current_code_type;
-extern uint8_t         g_selected_code;
+enum PTT_ID_t {
+	PTT_ID_OFF = 0,    // OFF
+	PTT_ID_TX_UP,      // BEGIN OF TX
+	PTT_ID_TX_DOWN,    // END OF TX
+	PTT_ID_BOTH,       // BOTH
+	PTT_ID_APOLLO      // Apolo quindar tones
+};
+typedef enum PTT_ID_t PTT_ID_t;
 
-extern vfo_state_t     g_vfo_state[2];
+enum VfoState_t
+{
+	VFO_STATE_NORMAL = 0,
+	VFO_STATE_BUSY,
+	VFO_STATE_BAT_LOW,
+	VFO_STATE_TX_DISABLE,
+	VFO_STATE_TIMEOUT,
+	VFO_STATE_ALARM,
+	VFO_STATE_VOLTAGE_HIGH,
+	_VFO_STATE_LAST_ELEMENT
+};
+typedef enum VfoState_t VfoState_t;
 
-bool     RADIO_channel_valid(uint16_t ChNum, bool bCheckScanList, uint8_t RadioNum);
-uint8_t  RADIO_FindNextChannel(uint8_t ChNum, scan_state_dir_t Direction, bool bCheckScanList, uint8_t RadioNum);
-void     RADIO_InitInfo(vfo_info_t *p_vfo, const uint8_t ChannelSave, const uint32_t Frequency);
-void     RADIO_configure_channel(const unsigned int VFO, const unsigned int configure);
-#ifdef ENABLE_VOX
-	void RADIO_enable_vox(unsigned int level);
+typedef enum {
+	MODULATION_FM,
+	MODULATION_AM,
+	MODULATION_USB,
+
+#ifdef ENABLE_BYP_RAW_DEMODULATORS
+	MODULATION_BYP,
+	MODULATION_RAW,
 #endif
-void     RADIO_ConfigureSquelch(vfo_info_t *p_vfo);
-void     RADIO_ConfigureTXPower(vfo_info_t *p_vfo);
-void     RADIO_apply_offset(vfo_info_t *p_vfo, const bool set_pees);
-void     RADIO_select_vfos(void);
-void     RADIO_setup_registers(bool switch_to_function_foreground);
+
+	MODULATION_UKNOWN
+} ModulationMode_t;
+
+extern const char gModulationStr[MODULATION_UKNOWN][4];
+
+typedef struct
+{
+	uint32_t       Frequency;
+	DCS_CodeType_t CodeType;
+	uint8_t        Code;
+	uint8_t        Padding[2];
+} FREQ_Config_t;
+
+typedef struct VFO_Info_t
+{
+	FREQ_Config_t  freq_config_RX;
+	FREQ_Config_t  freq_config_TX;
+
+	// this is for a purpose of the FrequencyReverse function
+	// it points to freq_config_RX normally and to freq_config_TX if reverse function is active
+	//
+	FREQ_Config_t *pRX;
+
+	// this is for a purpose of the FrequencyReverse function
+	// it points to freq_config_TX normally and to freq_config_RX if reverse function is active
+	FREQ_Config_t *pTX;
+
+	uint32_t       TX_OFFSET_FREQUENCY;
+	uint16_t       StepFrequency;
+
+	uint8_t        CHANNEL_SAVE;
+
+	uint8_t        TX_OFFSET_FREQUENCY_DIRECTION;
+
+	uint8_t        SquelchOpenRSSIThresh;
+	uint8_t        SquelchOpenNoiseThresh;
+	uint8_t        SquelchCloseGlitchThresh;
+	uint8_t        SquelchCloseRSSIThresh;
+	uint8_t        SquelchCloseNoiseThresh;
+	uint8_t        SquelchOpenGlitchThresh;
+
+	STEP_Setting_t STEP_SETTING;
+	uint8_t        OUTPUT_POWER;
+	uint8_t        TXP_CalculatedSetting;
+	bool           FrequencyReverse;
+
+	uint8_t        SCRAMBLING_TYPE;
+	uint8_t        CHANNEL_BANDWIDTH;
+
+	uint8_t        SCANLIST1_PARTICIPATION;
+	uint8_t        SCANLIST2_PARTICIPATION;
+
+	uint8_t        Band;
+#ifdef ENABLE_DTMF_CALLING
+	uint8_t        DTMF_DECODING_ENABLE;
+#endif
+	PTT_ID_t       DTMF_PTT_ID_TX_MODE;
+
+	uint8_t        BUSY_CHANNEL_LOCK;
+
+	ModulationMode_t    Modulation;
+
+	uint8_t        Compander;
+
+	char           Name[16];
+} VFO_Info_t;
+
+// Settings of the main VFO that is selected by the user
+// The pointer follows gEeprom.TX_VFO index
+extern VFO_Info_t    *gTxVfo;
+
+// Settings of the actual VFO that is now used for RX,
+// It is being alternated by dual watch, and flipped by crossband
+// The pointer follows gEeprom.RX_VFO
+extern VFO_Info_t    *gRxVfo;
+
+// Equal to gTxVfo unless dual watch changes it on incomming transmition (this can only happen when XB off and DW on)
+extern VFO_Info_t    *gCurrentVfo;
+
+extern DCS_CodeType_t gCurrentCodeType;
+
+extern VfoState_t     VfoState[2];
+
+bool     RADIO_CheckValidChannel(uint16_t ChNum, bool bCheckScanList, uint8_t RadioNum);
+uint8_t  RADIO_FindNextChannel(uint8_t ChNum, int8_t Direction, bool bCheckScanList, uint8_t RadioNum);
+void     RADIO_InitInfo(VFO_Info_t *pInfo, const uint8_t ChannelSave, const uint32_t Frequency);
+void     RADIO_ConfigureChannel(const unsigned int VFO, const unsigned int configure);
+void     RADIO_ConfigureSquelchAndOutputPower(VFO_Info_t *pInfo);
+void     RADIO_ApplyOffset(VFO_Info_t *pInfo);
+void     RADIO_SelectVfos(void);
+void     RADIO_SetupRegisters(bool switchToForeground);
 #ifdef ENABLE_NOAA
 	void RADIO_ConfigureNOAA(void);
 #endif
-void     RADIO_enableTX(const bool fsk_tx);
-
-void     RADIO_set_vfo_state(vfo_state_t State);
+void     RADIO_SetTxParameters(void);
+void 	 RADIO_SetupAGC(bool listeningAM, bool disable);
+void     RADIO_SetModulation(ModulationMode_t modulation);
+void     RADIO_SetVfoState(VfoState_t State);
 void     RADIO_PrepareTX(void);
-void     RADIO_enable_CxCSS_tail(void);
+void     RADIO_EnableCxCSS(void);
 void     RADIO_PrepareCssTX(void);
-void     RADIO_tx_eot(void);
+void     RADIO_SendEndOfTransmission(void);
 
 #endif

@@ -14,14 +14,14 @@
  *     limitations under the License.
  */
 
-#include "bsp/dp32g030/pmu.h"
-#include "bsp/dp32g030/syscon.h"
-#include "driver/system.h"
-#include "driver/systick.h"
+#include "../bsp/dp32g030/pmu.h"
+#include "../bsp/dp32g030/syscon.h"
+#include "system.h"
+#include "systick.h"
 
-void SYSTEM_DelayMs(const uint32_t Delay)
+void SYSTEM_DelayMs(uint32_t Delay)
 {
-	SYSTICK_Delay250ns(Delay * 4000);
+	SYSTICK_DelayUs(Delay * 1000);
 }
 
 void SYSTEM_ConfigureClocks(void)

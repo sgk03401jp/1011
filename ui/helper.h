@@ -20,21 +20,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void UI_GenerateChannelString(char *pString, const uint8_t Channel, const char separating_char);
-void UI_GenerateChannelStringEx(char *pString, const char *prefix, const uint8_t ChannelNumber);
-void UI_PrintString(const char *str, unsigned int start, const unsigned int end, const unsigned int line, const unsigned int width);
-void UI_PrintStringSmall(const char *str, const unsigned int start, const unsigned int end, const unsigned int line);
-#ifdef ENABLE_SMALL_BOLD
-	void UI_PrintStringSmallBold(const char *str, const unsigned int start, const unsigned int end, const unsigned int line);
-#endif
-#ifdef ENABLE_SMALLEST_FONT
-	void UI_PrintStringSmallest(const void *pString, unsigned int x, const unsigned int y, const bool statusbar, const bool fill);
-#endif
-void UI_PrintStringSmallBuffer(const char *pString, uint8_t *buffer);
-void UI_DisplayFrequencyBig(const char *pDigits, uint8_t X, uint8_t Y, bool bDisplayLeadingZero, bool flag, unsigned int length);
-void UI_DisplayFrequency(const char *pDigits, uint8_t X, uint8_t Y, bool bDisplayLeadingZero, unsigned int length);
-void UI_DisplayFrequencySmall(const char *pDigits, uint8_t X, uint8_t Y, bool bDisplayLeadingZero);
-void UI_Displaysmall_digits(const uint8_t size, const char *str, const uint8_t x, const uint8_t y, const bool display_leading_zeros);
+void UI_GenerateChannelString(char *pString, const uint8_t Channel);
+void UI_GenerateChannelStringEx(char *pString, const bool bShowPrefix, const uint8_t ChannelNumber);
+void UI_PrintString(const char *pString, uint8_t Start, uint8_t End, uint8_t Line, uint8_t Width);
+void UI_PrintStringSmallNormal(const char *pString, uint8_t Start, uint8_t End, uint8_t Line);
+void UI_PrintStringSmallBold(const char *pString, uint8_t Start, uint8_t End, uint8_t Line);
+void UI_PrintStringSmallBufferNormal(const char *pString, uint8_t *buffer);
+void UI_PrintStringSmallBufferBold(const char *pString, uint8_t * buffer);
+void UI_DisplayFrequency(const char *string, uint8_t X, uint8_t Y, bool center);
+
+void UI_DisplayPopup(const char *string);
+
+void UI_DrawPixelBuffer(uint8_t (*buffer)[128], uint8_t x, uint8_t y, bool black);
+void UI_DrawLineBuffer(uint8_t (*buffer)[128], int16_t x1, int16_t y1, int16_t x2, int16_t y2, bool black);
+void UI_DrawRectangleBuffer(uint8_t (*buffer)[128], int16_t x1, int16_t y1, int16_t x2, int16_t y2, bool black);
+
+void UI_DisplayClear();
 
 #endif
-

@@ -22,18 +22,10 @@
 #include "driver/i2c.h"
 #include "misc.h"
 
-int8_t     g_ptt_debounce;
-uint8_t    g_key_debounce_press;
-uint8_t    g_key_debounce_repeat;
-key_code_t g_key_prev    = KEY_INVALID;
-key_code_t g_key_pressed = KEY_INVALID;
-bool       g_key_held;
-bool       g_fkey_pressed;
-bool       g_ptt_is_pressed;
-
-bool       g_ptt_was_released;
-bool       g_ptt_was_pressed;
-uint8_t    g_keypad_locked;
+KEY_Code_t gKeyReading0     = KEY_INVALID;
+KEY_Code_t gKeyReading1     = KEY_INVALID;
+uint16_t   gDebounceCounter = 0;
+bool       gWasFKeyPressed  = false;
 
 static const struct {
 
@@ -44,7 +36,7 @@ static const struct {
 	// We are very fortunate.
 	// The key and pin defines fit together in a single u8, making this very efficient
 	struct {
-		key_code_t key : 5;
+		KEY_Code_t key : 5;
 		uint8_t    pin : 3; // Pin 6 is highest
 	} pins[4];
 
@@ -100,9 +92,12 @@ static const struct {
 	}
 };
 
-key_code_t KEYBOARD_Poll(void)
+KEY_Code_t KEYBOARD_Poll(void)
 {
-	key_code_t Key = KEY_INVALID;
+	KEY_Code_t Key = KEY_INVALID;
+
+//	if (!GPIO_CheckBit(&GPIOC->DATA, GPIOC_PIN_PTT))
+//		return KEY_PTT;
 
 	// *****************
 
@@ -122,17 +117,13 @@ key_code_t KEYBOARD_Poll(void)
 		GPIOA->DATA &= keyboard[j].set_to_zero_mask;
 
 		// Read all 4 GPIO pins at once .. with de-noise, max of 8 sample loops
-		for (i = 0, k = 0, reg = 0; i < 3 && k < 8; i++, k++)
-		{
-			uint16_t reg2;
-			SYSTICK_Delay250ns(4);
-			reg2 = GPIOA->DATA;
-			if (reg != reg2)
-			{	// noise
-				reg = reg2;
-				i   = 0;
-			}
+		for (i = 0, k = 0, reg = 0; i < 3 && k < 8; i++, k++) {
+			SYSTICK_DelayUs(1);
+			uint16_t reg2 = GPIOA->DATA;
+			i *= reg == reg2;
+			reg = reg2;
 		}
+
 		if (i < 3)
 			break;	// noise is too bad
 
@@ -157,8 +148,6 @@ key_code_t KEYBOARD_Poll(void)
 	// Reset VOICE pins
 	GPIO_ClearBit(&GPIOA->DATA, GPIOA_PIN_KEYBOARD_6);
 	GPIO_SetBit(  &GPIOA->DATA, GPIOA_PIN_KEYBOARD_7);
-
-	g_key_pressed = Key;
 
 	return Key;
 }

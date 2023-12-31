@@ -20,18 +20,19 @@
 #include <stdint.h>
 #include "driver/keyboard.h"
 
-enum boot_mode_e
+enum BOOT_Mode_t
 {
-	BOOT_MODE_NORMAL = 0,    // normal boot
-	BOOT_MODE_UNHIDE_HIDDEN,        // unhide the hidden menu items
+	BOOT_MODE_NORMAL = 0,
+	BOOT_MODE_F_LOCK,
 	#ifdef ENABLE_AIRCOPY
-		BOOT_MODE_AIRCOPY    // do an air-copy
+		BOOT_MODE_AIRCOPY
 	#endif
 };
-typedef enum boot_mode_e boot_mode_t;
 
-boot_mode_t BOOT_GetMode(void);
-void BOOT_ProcessMode(boot_mode_t Mode);
+typedef enum BOOT_Mode_t BOOT_Mode_t;
+
+BOOT_Mode_t BOOT_GetMode(void);
+void BOOT_ProcessMode(BOOT_Mode_t Mode);
 
 #endif
 

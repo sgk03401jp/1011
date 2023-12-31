@@ -25,231 +25,190 @@
 #include "driver/system.h"
 #include "misc.h"
 
-uint8_t g_status_line[128];
-uint8_t g_frame_buffer[7][128];
+uint8_t gStatusLine[LCD_WIDTH];
+uint8_t gFrameBuffer[FRAME_LINES][LCD_WIDTH];
 
-#ifdef ENABLE_CONTRAST
-	uint8_t contrast = 31;  // 0 ~ 63
-#endif
-
-static void ST7565_WriteByte(uint8_t Value);
-
-static inline void ST7565_LowLevelWrite(uint8_t Value)
-{
-        /* Wait for space in the fifo */
-        while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
-        SPI0->WDR = Value;
+static void DrawLine(uint8_t column, uint8_t line, const uint8_t * lineBuffer, unsigned size_defVal)
+{	
+	ST7565_SelectColumnAndLine(column + 4, line);
+	GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
+	for (unsigned i = 0; i < size_defVal; i++) {
+		while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
+		SPI0->WDR = lineBuffer ? lineBuffer[i] : size_defVal;
+	}
+	SPI_WaitForUndocumentedTxFifoStatusBit();
 }
 
-void ST7565_DrawLine(const unsigned int Column, const unsigned int Line, const unsigned int Size, const uint8_t *pBitmap)
+void ST7565_DrawLine(const unsigned int Column, const unsigned int Line, const uint8_t *pBitmap, const unsigned int Size)
 {
-	unsigned int i;
-
 	SPI_ToggleMasterMode(&SPI0->CR, false);
-
-	ST7565_SelectColumnAndLine(Column + 4U, Line);
-
-	GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-
-	if (pBitmap != NULL)
-	{
-		for (i = 0; i < Size; i++)
-		{
-                    ST7565_LowLevelWrite(pBitmap[i]);
-		}
-	}
-	else
-	{
-		for (i = 0; i < Size; i++)
-		{
-                    ST7565_LowLevelWrite(0);
-		}
-	}
-
-	SPI_WaitForUndocumentedTxFifoStatusBit();
-
+	DrawLine(Column, Line, pBitmap, Size);
 	SPI_ToggleMasterMode(&SPI0->CR, true);
 }
 
 void ST7565_BlitFullScreen(void)
 {
-	unsigned int Line;
-
-	// reset some of the displays settings to try and overcome the
-	// radios hardware problem - RF corrupting the display
-	ST7565_Init(false);
-
 	SPI_ToggleMasterMode(&SPI0->CR, false);
-
 	ST7565_WriteByte(0x40);
-
-	for (Line = 0; Line < ARRAY_SIZE(g_frame_buffer); Line++)
-	{
-		unsigned int Column;
-		ST7565_SelectColumnAndLine(4, Line + 1);
-		GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-		for (Column = 0; Column < ARRAY_SIZE(g_frame_buffer[0]); Column++)
-		{
-                    ST7565_LowLevelWrite(g_frame_buffer[Line][Column]);
-		}
-		SPI_WaitForUndocumentedTxFifoStatusBit();
+	for (unsigned line = 0; line < FRAME_LINES; line++) {
+		DrawLine(0, line+1, gFrameBuffer[line], LCD_WIDTH);
 	}
+	SPI_ToggleMasterMode(&SPI0->CR, true);
+}
 
-	#if 0
-		// whats the delay for, it holds things up :(
-		SYSTEM_DelayMs(20);
-	#else
-//		SYSTEM_DelayMs(1);
-	#endif
-
+void ST7565_BlitLine(unsigned line)
+{
+	SPI_ToggleMasterMode(&SPI0->CR, false);
+	ST7565_WriteByte(0x40);    // start line ?
+	DrawLine(0, line+1, gFrameBuffer[line], LCD_WIDTH);
 	SPI_ToggleMasterMode(&SPI0->CR, true);
 }
 
 void ST7565_BlitStatusLine(void)
 {	// the top small text line on the display
-
-	unsigned int i;
-
 	SPI_ToggleMasterMode(&SPI0->CR, false);
-
 	ST7565_WriteByte(0x40);    // start line ?
-
-	ST7565_SelectColumnAndLine(4, 0);
-
-	GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-
-	for (i = 0; i < ARRAY_SIZE(g_status_line); i++)
-	{
-                ST7565_LowLevelWrite(g_status_line[i]);
-	}
-
-	SPI_WaitForUndocumentedTxFifoStatusBit();
-
+	DrawLine(0, 0, gStatusLine, LCD_WIDTH);
 	SPI_ToggleMasterMode(&SPI0->CR, true);
 }
 
-void ST7565_FillScreen(const uint8_t Value)
+void ST7565_FillScreen(uint8_t value)
 {
-	unsigned int i;
-
-	// reset some of the displays settings to try and overcome the
-	// radios hardware problem - RF corrupting the display
-	ST7565_Init(false);
-
 	SPI_ToggleMasterMode(&SPI0->CR, false);
-
-	for (i = 0; i < 8; i++)
-	{
-		unsigned int j;
-		ST7565_SelectColumnAndLine(0, i);
-		GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-		for (j = 0; j < 132; j++)
-		{
-                        ST7565_LowLevelWrite(Value);
-		}
-		SPI_WaitForUndocumentedTxFifoStatusBit();
+	for (unsigned i = 0; i < 8; i++) {
+		DrawLine(0, i, NULL, value);
 	}
-
 	SPI_ToggleMasterMode(&SPI0->CR, true);
 }
 
-void ST7565_Init(const bool full)
+// Software reset
+const uint8_t ST7565_CMD_SOFTWARE_RESET = 0xE2;
+// Bias Select
+// 1 0 1 0 0 0 1 BS
+// Select bias setting 0=1/9; 1=1/7 (at 1/65 duty)
+const uint8_t ST7565_CMD_BIAS_SELECT = 0xA2;
+// COM Direction
+// 1 1 0 0 MY - - -
+// Set output direction of COM
+// MY=1, reverse direction
+// MY=0, normal direction
+const uint8_t ST7565_CMD_COM_DIRECTION = 0xC0;
+// SEG Direction
+// 1 0 1 0 0 0 0 MX
+// Set scan direction of SEG
+// MX=1, reverse direction
+// MX=0, normal direction
+const uint8_t ST7565_CMD_SEG_DIRECTION = 0xA0;
+// Inverse Display
+// 1 0 1 0 0 1 1 INV
+// INV =1, inverse display
+// INV =0, normal display
+const uint8_t ST7565_CMD_INVERSE_DISPLAY = 0xA6;
+// All Pixel ON
+// 1 0 1 0 0 1 0 AP
+// AP=1, set all pixel ON
+// AP=0, normal display
+const uint8_t ST7565_CMD_ALL_PIXEL_ON = 0xA4;
+// Regulation Ratio
+// 0 0 1 0 0 RR2 RR1 RR0
+// This instruction controls the regulation ratio of the built-in regulator
+const uint8_t ST7565_CMD_REGULATION_RATIO = 0x20;
+// Double command!! Set electronic volume (EV) level
+// Send next: 0 0 EV5 EV4 EV3 EV2 EV1 EV0  contrast 0-63
+const uint8_t ST7565_CMD_SET_EV = 0x81;
+// Control built-in power circuit ON/OFF - 0 0 1 0 1 VB VR VF
+// VB: Built-in Booster
+// VR: Built-in Regulator
+// VF: Built-in Follower
+const uint8_t ST7565_CMD_POWER_CIRCUIT = 0x28;
+// Set display start line 0-63
+// 0 0 0 1 S5 S4 S3 S2 S1 S0 
+const uint8_t ST7565_CMD_SET_START_LINE = 0x40;
+// Display ON/OFF 
+// 0 0 1 0 1 0 1 1 1 D 
+// D=1, display ON
+// D=0, display OFF
+const uint8_t ST7565_CMD_DISPLAY_ON_OFF = 0xAE;
+
+uint8_t cmds[] = {
+	ST7565_CMD_BIAS_SELECT | 0, 			// Select bias setting: 1/9
+	ST7565_CMD_COM_DIRECTION  | (0 << 3), 	// Set output direction of COM: normal
+	ST7565_CMD_SEG_DIRECTION | 1, 			// Set scan direction of SEG: reverse
+	ST7565_CMD_INVERSE_DISPLAY | 0, 		// Inverse Display: false
+	ST7565_CMD_ALL_PIXEL_ON | 0, 			// All Pixel ON: false - normal display
+	ST7565_CMD_REGULATION_RATIO | (4 << 0), // Regulation Ratio 5.0
+
+	ST7565_CMD_SET_EV,						// Set contrast
+	31,
+
+	ST7565_CMD_POWER_CIRCUIT | 0b111,		// Built-in power circuit ON/OFF: VB=1 VR=1 VF=1 
+	ST7565_CMD_SET_START_LINE | 0,			// Set Start Line: 0
+	ST7565_CMD_DISPLAY_ON_OFF | 1,			// Display ON/OFF: ON
+};
+
+void ST7565_Init(void)
 {
-	if (full)
-	{
-		SPI0_Init();
-		ST7565_HardwareReset();
-	}
-
+	SPI0_Init();
+	ST7565_HardwareReset();
 	SPI_ToggleMasterMode(&SPI0->CR, false);
+	ST7565_WriteByte(ST7565_CMD_SOFTWARE_RESET);   // software reset
+	SYSTEM_DelayMs(120);
 
-	if (full)
-	{
-		ST7565_WriteByte(0xE2);      // internal reset
-		SYSTEM_DelayMs(120);
-	}
+	for(uint8_t i = 0; i < 8; i++)
+		ST7565_WriteByte(cmds[i]);
+
+	ST7565_WriteByte(ST7565_CMD_POWER_CIRCUIT | 0b011);   // VB=0 VR=1 VF=1
+	SYSTEM_DelayMs(1);
+	ST7565_WriteByte(ST7565_CMD_POWER_CIRCUIT | 0b110);   // VB=1 VR=1 VF=0
+	SYSTEM_DelayMs(1);
+
+	for(uint8_t i = 0; i < 4; i++) // why 4 times?
+		ST7565_WriteByte(ST7565_CMD_POWER_CIRCUIT | 0b111);   // VB=1 VR=1 VF=1
+
+	SYSTEM_DelayMs(40);
 	
-	ST7565_WriteByte(0xA2);          // bias 9
-//	ST7565_WriteByte(0xA3);          // bias 7
-
-	ST7565_WriteByte(0xC0);          // COM normal
-//	ST7565_WriteByte(0xC8);          // COM reverse
-
-//	ST7565_WriteByte(0xA0);          // normal ADC .. mirrors the screen
-	ST7565_WriteByte(0xA1);          // reverse ADC
-
-	ST7565_WriteByte(0xA6);          // normal screen
-//	ST7565_WriteByte(0xA7);          // inverse screen
-
-	ST7565_WriteByte(0xA4);          // all points normal
-
-	ST7565_WriteByte(0x24);          // ???
-
-	ST7565_WriteByte(0x81);          //
-	#ifdef ENABLE_CONTRAST
-		ST7565_WriteByte(contrast);  // brightness 0 ~ 63
-	#else
-		ST7565_WriteByte(31);        // brightness 0 ~ 63
-	#endif
-
-	if (full)
-	{
-		ST7565_WriteByte(0x28 | 4u); // enable voltage converter VC=1 VR=0 VF=0
-		SYSTEM_DelayMs(50);
-
-		ST7565_WriteByte(0x28 | 6u); // enable voltage regulator VC=1 VR=1 VF=0
-		SYSTEM_DelayMs(50);
-
-		ST7565_WriteByte(0x28 | 7u); // enable voltage follower  VC=1 VR=1 VF=1
-		SYSTEM_DelayMs(10);
-
-		ST7565_WriteByte(0x20 | 6u); // set lcd operating voltage (regulator resistor, ref voltage resistor)
-	}
-
-	ST7565_WriteByte(0x40);          // start line ?
-	ST7565_WriteByte(0xAF);          // display on ?
-
+	ST7565_WriteByte(ST7565_CMD_SET_START_LINE | 0);   // line 0
+	ST7565_WriteByte(ST7565_CMD_DISPLAY_ON_OFF | 1);   // D=1
 	SPI_WaitForUndocumentedTxFifoStatusBit();
-
 	SPI_ToggleMasterMode(&SPI0->CR, true);
 
-	if (full)
-		ST7565_FillScreen(0x00);
+	ST7565_FillScreen(0x00);
+}
+
+void ST7565_FixInterfGlitch(void)
+{
+	SPI_ToggleMasterMode(&SPI0->CR, false);
+	for(uint8_t i = 0; i < ARRAY_SIZE(cmds); i++)
+		ST7565_WriteByte(cmds[i]);
+	SPI_WaitForUndocumentedTxFifoStatusBit();
+	SPI_ToggleMasterMode(&SPI0->CR, true);
 }
 
 void ST7565_HardwareReset(void)
 {
-	GPIO_SetBit(  &GPIOB->DATA, GPIOB_PIN_ST7565_RES);
+	GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_RES);
 	SYSTEM_DelayMs(1);
 	GPIO_ClearBit(&GPIOB->DATA, GPIOB_PIN_ST7565_RES);
 	SYSTEM_DelayMs(20);
-	GPIO_SetBit(  &GPIOB->DATA, GPIOB_PIN_ST7565_RES);
+	GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_ST7565_RES);
 	SYSTEM_DelayMs(120);
 }
 
-void ST7565_SelectColumnAndLine(const uint8_t Column, const uint8_t Line)
+void ST7565_SelectColumnAndLine(uint8_t Column, uint8_t Line)
 {
 	GPIO_ClearBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-        ST7565_LowLevelWrite(Line + 0xB0);
-        ST7565_LowLevelWrite(((Column >> 4) & 0x0F) | 0x10);
-        ST7565_LowLevelWrite((Column >> 0) & 0x0F);
+	while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
+	SPI0->WDR = Line + 176;
+	while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
+	SPI0->WDR = ((Column >> 4) & 0x0F) | 0x10;
+	while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
+	SPI0->WDR = ((Column >> 0) & 0x0F);
 	SPI_WaitForUndocumentedTxFifoStatusBit();
 }
 
-static void ST7565_WriteByte(uint8_t Value)
+void ST7565_WriteByte(uint8_t Value)
 {
 	GPIO_ClearBit(&GPIOB->DATA, GPIOB_PIN_ST7565_A0);
-        ST7565_LowLevelWrite(Value);
+	while ((SPI0->FIFOST & SPI_FIFOST_TFF_MASK) != SPI_FIFOST_TFF_BITS_NOT_FULL) {}
+	SPI0->WDR = Value;
 }
-
-#ifdef ENABLE_CONTRAST
-	void ST7565_SetContrast(const uint8_t value)
-	{
-		contrast = (value > 45) ? 45 : (value < 26) ? 26 : value;
-	}
-
-	uint8_t ST7565_GetContrast(void)
-	{
-		return contrast;
-	}
-#endif

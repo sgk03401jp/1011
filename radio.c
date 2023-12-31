@@ -14,495 +14,429 @@
  *     limitations under the License.
  */
 
-#include "app/app.h"
+#include "driver/bk4819-regs.h"
+#include <string.h>
+
+#include "am_fix.h"
 #include "app/dtmf.h"
 #ifdef ENABLE_FMRADIO
 	#include "app/fm.h"
 #endif
-#ifdef ENABLE_AM_FIX
-	#include "am_fix.h"
-#endif
 #include "audio.h"
-#include "board.h"
 #include "bsp/dp32g030/gpio.h"
 #include "dcs.h"
 #include "driver/bk4819.h"
 #include "driver/eeprom.h"
 #include "driver/gpio.h"
 #include "driver/system.h"
-#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-	#include "driver/uart.h"
-#endif
 #include "frequencies.h"
 #include "functions.h"
 #include "helper/battery.h"
-#ifdef ENABLE_MDC1200
-	#include "mdc1200.h"
-#endif
 #include "misc.h"
-#ifdef ENABLE_PANADAPTER
-	#include "panadapter.h"
-#endif
 #include "radio.h"
 #include "settings.h"
 #include "ui/menu.h"
-#include "ui/ui.h"
 
-vfo_info_t      g_vfo_info[2];
-vfo_info_t     *g_tx_vfo;
-vfo_info_t     *g_rx_vfo;
-vfo_info_t     *g_current_vfo;
-dcs_code_type_t g_selected_code_type;
-dcs_code_type_t g_current_code_type;
-uint8_t         g_selected_code;
-vfo_state_t     g_vfo_state[2];
+VFO_Info_t    *gTxVfo;
+VFO_Info_t    *gRxVfo;
+VFO_Info_t    *gCurrentVfo;
+DCS_CodeType_t gCurrentCodeType;
+VfoState_t     VfoState[2];
 
-bool RADIO_channel_valid(uint16_t Channel, bool bCheckScanList, uint8_t VFO)
-{	// return true if the channel appears valid
+const char gModulationStr[MODULATION_UKNOWN][4] = {
+	[MODULATION_FM]="FM",
+	[MODULATION_AM]="AM",
+	[MODULATION_USB]="USB",
 
-	unsigned int   i;
-	uint8_t        priority_channel[2];
+#ifdef ENABLE_BYP_RAW_DEMODULATORS
+	[MODULATION_BYP]="BYP",
+	[MODULATION_RAW]="RAW"
+#endif
+};
 
-	if (Channel > USER_CHANNEL_LAST)
+
+
+bool RADIO_CheckValidChannel(uint16_t Channel, bool bCheckScanList, uint8_t VFO)
+{
+	// return true if the channel appears valid
+	if (!IS_MR_CHANNEL(Channel)) {
 		return false;
-
-	if (g_eeprom.config.channel_attributes[Channel].band > BAND7_470MHz)
-		return false;
-
-	if (bCheckScanList)
-	{
-		switch (VFO)
-		{
-			case 0:
-				if (g_eeprom.config.channel_attributes[Channel].scanlist1 == 0)
-					return false;
-
-				for (i = 0; i < 2; i++)
-					priority_channel[i] = g_eeprom.config.setting.priority_scan_list[VFO].channel[i];
-				break;
-
-			case 1:
-				if (g_eeprom.config.channel_attributes[Channel].scanlist2 == 0)
-					return false;
-
-				for (i = 0; i < 2; i++)
-					priority_channel[i] = g_eeprom.config.setting.priority_scan_list[VFO].channel[i];
-				break;
-
-			default:
-				return true;
-		}
-
-		if (priority_channel[0] == Channel)
-			return false;
-
-		if (priority_channel[1] == Channel)
-			return false;
 	}
 
-	return true;
+	const ChannelAttributes_t att = gMR_ChannelAttributes[Channel];
+
+	if (att.band > BAND7_470MHz) {
+		return false;
+	}
+
+	if (!bCheckScanList) {
+		return true;
+	}
+
+	if (VFO >= 2) {
+		return true;
+	}
+
+	if (!att.scanlist1) {
+		return false;
+	}
+
+	const uint8_t PriorityCh1 = gEeprom.SCANLIST_PRIORITY_CH1[VFO];
+	const uint8_t PriorityCh2 = gEeprom.SCANLIST_PRIORITY_CH2[VFO];
+
+	return PriorityCh1 != Channel && PriorityCh2 != Channel;
 }
 
-uint8_t RADIO_FindNextChannel(uint8_t Channel, scan_state_dir_t Direction, bool bCheckScanList, uint8_t VFO)
+uint8_t RADIO_FindNextChannel(uint8_t Channel, int8_t Direction, bool bCheckScanList, uint8_t VFO)
 {
-	unsigned int i;
+	for (unsigned int i = 0; IS_MR_CHANNEL(i); i++, Channel += Direction) {
+		if (Channel == 0xFF) {
+			Channel = MR_CHANNEL_LAST;
+		} else if (!IS_MR_CHANNEL(Channel)) {
+			Channel = MR_CHANNEL_FIRST;
+		}
 
-	for (i = 0; i <= USER_CHANNEL_LAST; i++)
-	{
-		if (Channel == 0xFF)
-			Channel = USER_CHANNEL_LAST;
-		else
-		if (Channel > USER_CHANNEL_LAST)
-			Channel = USER_CHANNEL_FIRST;
-
-		if (RADIO_channel_valid(Channel, bCheckScanList, VFO))
+		if (RADIO_CheckValidChannel(Channel, bCheckScanList, VFO)) {
 			return Channel;
-
-		Channel += Direction;
+		}
 	}
 
 	return 0xFF;
 }
 
-void RADIO_InitInfo(vfo_info_t *p_vfo, const uint8_t ChannelSave, const uint32_t Frequency)
+void RADIO_InitInfo(VFO_Info_t *pInfo, const uint8_t ChannelSave, const uint32_t Frequency)
 {
-	if (p_vfo == NULL)
-		return;
+	memset(pInfo, 0, sizeof(*pInfo));
 
-	memset(p_vfo, 0, sizeof(*p_vfo));
-
-	p_vfo->channel_attributes.band      = FREQUENCY_GetBand(Frequency);
-	p_vfo->channel_attributes.scanlist1 = 1;
-	p_vfo->channel_attributes.scanlist2 = 1;
-	p_vfo->channel.step_setting         = STEP_12_5kHz;
-	p_vfo->step_freq                    = STEP_FREQ_TABLE[p_vfo->channel.step_setting];
-	p_vfo->channel_save                 = ChannelSave;
-	p_vfo->channel.frequency_reverse    = false;
-	p_vfo->channel.tx_power             = OUTPUT_POWER_LOW;
-	p_vfo->freq_config_rx.frequency     = Frequency;
-	p_vfo->freq_config_tx.frequency     = Frequency;
-	p_vfo->p_rx                         = &p_vfo->freq_config_rx;
-	p_vfo->p_tx                         = &p_vfo->freq_config_tx;
-	p_vfo->channel.compand              = COMPAND_OFF;
-	p_vfo->channel.squelch_level        = 0;  // use main squelch
-	p_vfo->freq_in_channel              = 0xff;
+	pInfo->Band                     = FREQUENCY_GetBand(Frequency);
+	pInfo->SCANLIST1_PARTICIPATION  = false;
+	pInfo->SCANLIST2_PARTICIPATION  = false;
+	pInfo->STEP_SETTING             = STEP_12_5kHz;
+	pInfo->StepFrequency            = gStepFrequencyTable[pInfo->STEP_SETTING];
+	pInfo->CHANNEL_SAVE             = ChannelSave;
+	pInfo->FrequencyReverse         = false;
+	pInfo->OUTPUT_POWER             = OUTPUT_POWER_LOW;
+	pInfo->freq_config_RX.Frequency = Frequency;
+	pInfo->freq_config_TX.Frequency = Frequency;
+	pInfo->pRX                      = &pInfo->freq_config_RX;
+	pInfo->pTX                      = &pInfo->freq_config_TX;
+	pInfo->Compander                = 0;  // off
 
 	if (ChannelSave == (FREQ_CHANNEL_FIRST + BAND2_108MHz))
-		p_vfo->channel.mod_mode = MOD_MODE_AM;
+		pInfo->Modulation = MODULATION_AM;
+	else
+		pInfo->Modulation = MODULATION_FM;
 
-	RADIO_ConfigureSquelch(p_vfo);
-//	RADIO_ConfigureTXPower(p_vfo);
+	RADIO_ConfigureSquelchAndOutputPower(pInfo);
 }
 
-void RADIO_configure_channel(const unsigned int VFO, const unsigned int configure)
+void RADIO_ConfigureChannel(const unsigned int VFO, const unsigned int configure)
 {
-	unsigned int     channel;
-	unsigned int     chan;
-	t_channel_attrib attributes;
-//	uint16_t         base;
-	uint32_t         frequency;
-	vfo_info_t      *p_vfo = &g_vfo_info[VFO];
+	VFO_Info_t *pVfo = &gEeprom.VfoInfo[VFO];
 
-	if (!g_eeprom.config.setting.enable_350)
-	{
-		if (g_eeprom.config.setting.indices.vfo[VFO].frequency == (FREQ_CHANNEL_LAST - 2))
-			g_eeprom.config.setting.indices.vfo[VFO].frequency = FREQ_CHANNEL_LAST - 1;
+	if (!gSetting_350EN) {
+		if (gEeprom.FreqChannel[VFO] == FREQ_CHANNEL_FIRST + BAND5_350MHz)
+			gEeprom.FreqChannel[VFO] = FREQ_CHANNEL_FIRST + BAND6_400MHz;
 
-		if (g_eeprom.config.setting.indices.vfo[VFO].screen == (FREQ_CHANNEL_LAST - 2))
-			g_eeprom.config.setting.indices.vfo[VFO].screen = FREQ_CHANNEL_LAST - 1;
+		if (gEeprom.ScreenChannel[VFO] == FREQ_CHANNEL_FIRST + BAND5_350MHz)
+			gEeprom.ScreenChannel[VFO] = FREQ_CHANNEL_FIRST + BAND6_400MHz;
 	}
 
-	channel = g_eeprom.config.setting.indices.vfo[VFO].screen;
+	uint8_t channel = gEeprom.ScreenChannel[VFO];
 
-	p_vfo->freq_in_channel = 0xff;
-
-	if (IS_VALID_CHANNEL(channel))
-	{
-		#ifdef ENABLE_NOAA
-			if (channel >= NOAA_CHANNEL_FIRST)
-			{
-				RADIO_InitInfo(p_vfo, g_eeprom.config.setting.indices.vfo[VFO].screen, NOAA_FREQUENCY_TABLE[channel - NOAA_CHANNEL_FIRST]);
-				if (g_eeprom.config.setting.cross_vfo == CROSS_BAND_OFF)
-					return;
-				g_eeprom.config.setting.cross_vfo = CROSS_BAND_OFF;
-				g_update_status = true;
-				return;
-			}
-		#endif
-
-		if (channel <= USER_CHANNEL_LAST)
+	if (IS_VALID_CHANNEL(channel)) {
+#ifdef ENABLE_NOAA
+		if (IS_NOAA_CHANNEL(channel))
 		{
-			channel = RADIO_FindNextChannel(channel, SCAN_STATE_DIR_FORWARD, false, VFO);
-			if (!IS_VALID_CHANNEL(channel))
-			{
-				channel = g_eeprom.config.setting.indices.vfo[VFO].frequency;
-				g_eeprom.config.setting.indices.vfo[VFO].screen = channel;
+			RADIO_InitInfo(pVfo, gEeprom.ScreenChannel[VFO], NoaaFrequencyTable[channel - NOAA_CHANNEL_FIRST]);
+
+			if (gEeprom.CROSS_BAND_RX_TX == CROSS_BAND_OFF)
+				return;
+
+			gEeprom.CROSS_BAND_RX_TX = CROSS_BAND_OFF;
+
+			gUpdateStatus = true;
+			return;
+		}
+#endif
+
+		if (IS_MR_CHANNEL(channel)) {
+			channel = RADIO_FindNextChannel(channel, RADIO_CHANNEL_UP, false, VFO);
+			if (channel == 0xFF) {
+				channel                    = gEeprom.FreqChannel[VFO];
+				gEeprom.ScreenChannel[VFO] = gEeprom.FreqChannel[VFO];
 			}
-			else
-			{
-				g_eeprom.config.setting.indices.vfo[VFO].screen = channel;
-				g_eeprom.config.setting.indices.vfo[VFO].user   = channel;
+			else {
+				gEeprom.ScreenChannel[VFO] = channel;
+				gEeprom.MrChannel[VFO]     = channel;
 			}
 		}
 	}
 	else
-	{
 		channel = FREQ_CHANNEL_LAST - 1;
-	}
 
-	chan = CHANNEL_NUM(channel, VFO);
-
-	attributes = g_eeprom.config.channel_attributes[channel];
-
-	#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//		UART_printf("config chan 1   %u %u   %u %u %u\r\n", channel, chan, attributes.band, attributes.scanlist1, attributes.scanlist2);
-	#endif
-
-	if (attributes.attributes == 0xff)
-	{	// invalid/unused channel
-
-		unsigned int index;
-
-		if (channel <= USER_CHANNEL_LAST)
-		{
-			channel = g_eeprom.config.setting.indices.vfo[VFO].frequency;
-			g_eeprom.config.setting.indices.vfo[VFO].screen = channel;
+	ChannelAttributes_t att = gMR_ChannelAttributes[channel];
+	if (att.__val == 0xFF) { // invalid/unused channel
+		if (IS_MR_CHANNEL(channel)) {
+			channel                    = gEeprom.FreqChannel[VFO];
+			gEeprom.ScreenChannel[VFO] = channel;
 		}
 
-		index = channel - FREQ_CHANNEL_FIRST;
-
-		RADIO_InitInfo(p_vfo, channel, FREQ_BAND_TABLE[index].lower);
+		uint8_t bandIdx = channel - FREQ_CHANNEL_FIRST;
+		RADIO_InitInfo(pVfo, channel, frequencyBandTable[bandIdx].lower);
 		return;
 	}
 
-	if (attributes.band > BAND7_470MHz)
-		attributes.band = BAND6_400MHz;
-
-	if (channel <= USER_CHANNEL_LAST)
-	{	// USER channel
-		p_vfo->channel_attributes = attributes;
+	uint8_t band = att.band;
+	if (band > BAND7_470MHz) {
+		band = BAND6_400MHz;
 	}
+
+	bool bParticipation1;
+	bool bParticipation2;
+	if (IS_MR_CHANNEL(channel)) {
+		bParticipation1 = att.scanlist1;
+		bParticipation2 = att.scanlist2;
+	}
+	else {
+		band = channel - FREQ_CHANNEL_FIRST;
+		bParticipation1 = true;
+		bParticipation2 = true;
+	}
+
+	pVfo->Band                    = band;
+	pVfo->SCANLIST1_PARTICIPATION = bParticipation1;
+	pVfo->SCANLIST2_PARTICIPATION = bParticipation2;
+	pVfo->CHANNEL_SAVE            = channel;
+
+	uint16_t base;
+	if (IS_MR_CHANNEL(channel))
+		base = channel * 16;
 	else
-	if (IS_FREQ_CHANNEL(channel))
-	{	// VFO channel
-		attributes.band = channel - FREQ_CHANNEL_FIRST;
-		p_vfo->channel_attributes = attributes;
-		#if 0
-			// don't allow the VFO's to change their scanlist bits
-			p_vfo->channel_attributes.scanlist2 = 1;
-			p_vfo->channel_attributes.scanlist1 = 1;
-		#endif
-	}
-
-	p_vfo->channel_save = channel;
-
-//	if (channel <= USER_CHANNEL_LAST)
-//		base = channel * 16;
-//	else
-//		base = 0x0C80 + ((channel - FREQ_CHANNEL_FIRST) * 16 * 2) + (VFO * 16);  // VFO channel
+		base = 0x0C80 + ((channel - FREQ_CHANNEL_FIRST) * 32) + (VFO * 16);
 
 	if (configure == VFO_CONFIGURE_RELOAD || IS_FREQ_CHANNEL(channel))
 	{
-//		EEPROM_ReadBuffer(Base, &m_channel, sizeof(t_channel));
+		uint8_t tmp;
+		uint8_t data[8];
 
-//		EEPROM_ReadBuffer(Base, p_vfo->channel, sizeof(t_channel));
-		memcpy(&p_vfo->channel, &g_eeprom.config.channel[chan], sizeof(t_channel));
+		// ***************
 
-		p_vfo->step_freq = STEP_FREQ_TABLE[p_vfo->channel.step_setting];
+		EEPROM_ReadBuffer(base + 8, data, sizeof(data));
 
-		p_vfo->channel_attributes = g_eeprom.config.channel_attributes[channel];
+		tmp = data[3] & 0x0F;
+		if (tmp > TX_OFFSET_FREQUENCY_DIRECTION_SUB)
+			tmp = 0;
+		pVfo->TX_OFFSET_FREQUENCY_DIRECTION = tmp;
+		tmp = data[3] >> 4;
+		if (tmp >= MODULATION_UKNOWN)
+			tmp = MODULATION_FM;
+		pVfo->Modulation = tmp;
 
-		p_vfo->freq_config_rx.frequency = p_vfo->channel.frequency;
+		tmp = data[6];
+		if (tmp >= STEP_N_ELEM)
+			tmp = STEP_12_5kHz;
+		pVfo->STEP_SETTING  = tmp;
+		pVfo->StepFrequency = gStepFrequencyTable[tmp];
 
-		p_vfo->freq_config_rx.code_type = p_vfo->channel.rx_ctcss_cdcss_type;
-		p_vfo->freq_config_rx.code      = p_vfo->channel.rx_ctcss_cdcss_code;
+		tmp = data[7];
+		if (tmp > (ARRAY_SIZE(gSubMenu_SCRAMBLER) - 1))
+			tmp = 0;
+		pVfo->SCRAMBLING_TYPE = tmp;
 
-		p_vfo->freq_config_tx.code_type = p_vfo->channel.tx_ctcss_cdcss_type;
-		p_vfo->freq_config_tx.code      = p_vfo->channel.tx_ctcss_cdcss_code;
+		pVfo->freq_config_RX.CodeType = (data[2] >> 0) & 0x0F;
+		pVfo->freq_config_TX.CodeType = (data[2] >> 4) & 0x0F;
 
-		#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//			UART_printf("config chan 2   %u %u   %u %u %u  %uHz\r\n", channel, chan, p_vfo->channel_attributes.band, p_vfo->channel_attributes.scanlist1, p_vfo->channel_attributes.scanlist2, p_vfo->channel.frequency * 10);
-		#endif
+		tmp = data[0];
+		switch (pVfo->freq_config_RX.CodeType)
+		{
+			default:
+			case CODE_TYPE_OFF:
+				pVfo->freq_config_RX.CodeType = CODE_TYPE_OFF;
+				tmp = 0;
+				break;
+
+			case CODE_TYPE_CONTINUOUS_TONE:
+				if (tmp > (ARRAY_SIZE(CTCSS_Options) - 1))
+					tmp = 0;
+				break;
+
+			case CODE_TYPE_DIGITAL:
+			case CODE_TYPE_REVERSE_DIGITAL:
+				if (tmp > (ARRAY_SIZE(DCS_Options) - 1))
+					tmp = 0;
+				break;
+		}
+		pVfo->freq_config_RX.Code = tmp;
+
+		tmp = data[1];
+		switch (pVfo->freq_config_TX.CodeType)
+		{
+			default:
+			case CODE_TYPE_OFF:
+				pVfo->freq_config_TX.CodeType = CODE_TYPE_OFF;
+				tmp = 0;
+				break;
+
+			case CODE_TYPE_CONTINUOUS_TONE:
+				if (tmp > (ARRAY_SIZE(CTCSS_Options) - 1))
+					tmp = 0;
+				break;
+
+			case CODE_TYPE_DIGITAL:
+			case CODE_TYPE_REVERSE_DIGITAL:
+				if (tmp > (ARRAY_SIZE(DCS_Options) - 1))
+					tmp = 0;
+				break;
+		}
+		pVfo->freq_config_TX.Code = tmp;
+
+		if (data[4] == 0xFF)
+		{
+			pVfo->FrequencyReverse  = false;
+			pVfo->CHANNEL_BANDWIDTH = BK4819_FILTER_BW_WIDE;
+			pVfo->OUTPUT_POWER      = OUTPUT_POWER_LOW;
+			pVfo->BUSY_CHANNEL_LOCK = false;
+		}
+		else
+		{
+			const uint8_t d4 = data[4];
+			pVfo->FrequencyReverse  = !!((d4 >> 0) & 1u);
+			pVfo->CHANNEL_BANDWIDTH = !!((d4 >> 1) & 1u);
+			pVfo->OUTPUT_POWER      =   ((d4 >> 2) & 3u);
+			pVfo->BUSY_CHANNEL_LOCK = !!((d4 >> 4) & 1u);
+		}
+
+		if (data[5] == 0xFF)
+		{
+#ifdef ENABLE_DTMF_CALLING
+			pVfo->DTMF_DECODING_ENABLE = false;
+#endif
+			pVfo->DTMF_PTT_ID_TX_MODE  = PTT_ID_OFF;
+		}
+		else
+		{
+#ifdef ENABLE_DTMF_CALLING
+			pVfo->DTMF_DECODING_ENABLE = ((data[5] >> 0) & 1u) ? true : false;
+#endif
+			pVfo->DTMF_PTT_ID_TX_MODE  = ((data[5] >> 1) & 7u);
+		}
+
+		// ***************
+
+		struct {
+			uint32_t Frequency;
+			uint32_t Offset;
+		} __attribute__((packed)) info;
+		EEPROM_ReadBuffer(base, &info, sizeof(info));
+		if(info.Frequency==0xFFFFFFFF)
+			pVfo->freq_config_RX.Frequency = frequencyBandTable[band].lower;
+		else
+			pVfo->freq_config_RX.Frequency = info.Frequency;
+
+		if (info.Offset >= _1GHz_in_KHz)
+			info.Offset = _1GHz_in_KHz / 100;
+
+		pVfo->TX_OFFSET_FREQUENCY = info.Offset;
+
+		// ***************
+	}
+
+	uint32_t frequency = pVfo->freq_config_RX.Frequency;
+
+	// fix previously set incorrect band
+	band = FREQUENCY_GetBand(frequency);
+
+	if (frequency < frequencyBandTable[band].lower)
+		frequency = frequencyBandTable[band].lower;
+	else if (frequency > frequencyBandTable[band].upper)
+		frequency = frequencyBandTable[band].upper;
+	else if (channel >= FREQ_CHANNEL_FIRST)
+		frequency = FREQUENCY_RoundToStep(frequency, pVfo->StepFrequency);
+
+	pVfo->freq_config_RX.Frequency = frequency;
+
+	if (frequency >= frequencyBandTable[BAND2_108MHz].upper && frequency < frequencyBandTable[BAND2_108MHz].upper)
+		pVfo->TX_OFFSET_FREQUENCY_DIRECTION = TX_OFFSET_FREQUENCY_DIRECTION_OFF;
+	else if (!IS_MR_CHANNEL(channel))
+		pVfo->TX_OFFSET_FREQUENCY = FREQUENCY_RoundToStep(pVfo->TX_OFFSET_FREQUENCY, pVfo->StepFrequency);
+
+	RADIO_ApplyOffset(pVfo);
+
+	if (IS_MR_CHANNEL(channel))
+	{	// 16 bytes allocated to the channel name but only 10 used, the rest are 0's
+		SETTINGS_FetchChannelName(pVfo->Name, channel);
+	}
+
+	if (!pVfo->FrequencyReverse)
+	{
+		pVfo->pRX = &pVfo->freq_config_RX;
+		pVfo->pTX = &pVfo->freq_config_TX;
 	}
 	else
 	{
-		#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//			UART_printf("config chan 3   %u   %u %u %u  %uHz\r\n", channel, p_vfo->channel_attributes.band, p_vfo->channel_attributes.scanlist1, p_vfo->channel_attributes.scanlist2, p_vfo->channel.frequency * 10);
-		#endif
+		pVfo->pRX = &pVfo->freq_config_TX;
+		pVfo->pTX = &pVfo->freq_config_RX;
 	}
 
-	frequency = p_vfo->freq_config_rx.frequency;
-
-	if (frequency < FREQ_BAND_TABLE[attributes.band].lower)
-		frequency = FREQ_BAND_TABLE[attributes.band].lower;
-	else
-	if (frequency >= FREQ_BAND_TABLE[attributes.band].upper)
-		frequency = FREQUENCY_floor_to_step(frequency, p_vfo->step_freq, FREQ_BAND_TABLE[attributes.band].lower, FREQ_BAND_TABLE[attributes.band].upper);
-//	else
-//	if (channel >= FREQ_CHANNEL_FIRST)
-//		frequency = FREQUENCY_floor_to_step(frequency, p_vfo->step_freq, FREQ_BAND_TABLE[attributes.band].lower, FREQ_BAND_TABLE[attributes.band].upper);
-
-	if (!g_eeprom.config.setting.enable_350 && frequency >= 35000000 && frequency < 40000000)
-	{	// 350~400Mhz not allowed
-
-		// hop onto the next band up
-		frequency                        = 43350000;
-		p_vfo->freq_config_rx.frequency  = frequency;
-		p_vfo->freq_config_tx.frequency  = frequency;
-		attributes.band                  = FREQUENCY_GetBand(frequency);
-		p_vfo->channel_attributes.band   = attributes.band;
-		p_vfo->channel.frequency_reverse = 0;
-		p_vfo->channel.tx_offset_dir     = TX_OFFSET_FREQ_DIR_OFF;
-		p_vfo->channel.tx_offset         = 0;
-
-
-		// TODO: also update other settings such as step size
-
-
-	}
-
-	p_vfo->freq_config_rx.frequency = frequency;
-
-	if (frequency >= AIR_BAND.lower && frequency < AIR_BAND.upper)
-	{	// air band
-		p_vfo->channel.tx_offset_dir = TX_OFFSET_FREQ_DIR_OFF;
-		p_vfo->channel.tx_offset     = 0;
-	}
-	else
-	if (channel > USER_CHANNEL_LAST)
+	if (!gSetting_350EN)
 	{
-		p_vfo->channel.tx_offset = FREQUENCY_floor_to_step(p_vfo->channel.tx_offset + (p_vfo->step_freq / 2), p_vfo->step_freq, 0, p_vfo->channel.tx_offset + p_vfo->step_freq);
+		FREQ_Config_t *pConfig = pVfo->pRX;
+		if (pConfig->Frequency >= 35000000 && pConfig->Frequency < 40000000)
+			pConfig->Frequency = 43300000;
 	}
 
-	RADIO_apply_offset(p_vfo, true);
+	pVfo->Compander = att.compander;
 
-	// channel name
-	memset(&p_vfo->channel_name, 0, sizeof(p_vfo->channel_name));
-	if (channel <= USER_CHANNEL_LAST)
-//		EEPROM_ReadBuffer(0x0F50 + (channel * 16), p_vfo->channel_name, 10);	// only 10 bytes used
-		memcpy(p_vfo->channel_name.name, &g_eeprom.config.channel_name[channel].name, sizeof(p_vfo->channel_name.name));
-
-	if (p_vfo->channel.mod_mode != MOD_MODE_FM)
-	{	// freq/chan is in AM mode
-		// disable stuff, even though it can all still be used with AM ???
-		p_vfo->channel.scrambler            = 0;
-//		p_vfo->channel.dtmf_decoding_enable = 0;
-		p_vfo->freq_config_rx.code_type     = CODE_TYPE_NONE;
-		p_vfo->freq_config_tx.code_type     = CODE_TYPE_NONE;
-	}
-
-	RADIO_ConfigureSquelch(p_vfo);
-//	RADIO_ConfigureTXPower(p_vfo);
-
-	#ifdef ENABLE_AM_FIX
-		AM_fix_reset(VFO);
-
-		if (p_vfo->channel.mod_mode != MOD_MODE_FM && g_eeprom.config.setting.am_fix)
-		{
-			#ifdef ENABLE_PANADAPTER
-				if (!PAN_scanning())
-				{
-					AM_fix_10ms(VFO);
-				}
-				else
-				{  // don't do agc
-					BK4819_DisableAGC();
-					BK4819_write_reg(0x13, (g_orig_lnas << 8) | (g_orig_lna << 5) | (g_orig_mixer << 3) | (g_orig_pga << 0));
-				}
-			#else
-				AM_fix_10ms(VFO);
-			#endif
-		}
-		else
-		{  // don't do agc in FM mode
-			BK4819_DisableAGC();
-			BK4819_write_reg(0x13, (g_orig_lnas << 8) | (g_orig_lna << 5) | (g_orig_mixer << 3) | (g_orig_pga << 0));
-		}
-	#else
-		if (p_vfo->mod_mode != MOD_MODE_FM)
-		{
-			#ifdef ENABLE_PANADAPTER
-				if (!PAN_scanning())
-				{
-					BK4819_EnableAGC();
-				}
-				else
-				{  // don't do agc
-					BK4819_DisableAGC();
-					BK4819_write_reg(0x13, (g_orig_lnas << 8) | (g_orig_lna << 5) | (g_orig_mixer << 3) | (g_orig_pga << 0));
-				}
-			#else
-				BK4819_EnableAGC();
-			#endif
-		}
-		else
-		{  // don't do agc in FM mode
-			BK4819_DisableAGC();
-			BK4819_write_reg(0x13, (g_orig_lnas << 8) | (g_orig_lna << 5) | (g_orig_mixer << 3) | (g_orig_pga << 0));
-		}
-	#endif
-
-//	if (configure == VFO_CONFIGURE_RELOAD || IS_FREQ_CHANNEL(channel))
-	if (IS_FREQ_CHANNEL(channel))
-		p_vfo->freq_in_channel = SETTINGS_find_channel(frequency); // find channel that has this frequency
+	RADIO_ConfigureSquelchAndOutputPower(pVfo);
 }
 
-#ifdef ENABLE_VOX
-	void RADIO_enable_vox(unsigned int level)
-	{
-		uint16_t threshold_enable;
-		uint16_t threshold_disable;
-
-		if (level > (ARRAY_SIZE(g_eeprom.calib.vox[0].threshold) - 1))
-			level = ARRAY_SIZE(g_eeprom.calib.vox[0].threshold) - 1;
-
-		// my eeprom values ..
-		//
-		// vox threshold enable   30 50 70 90 110 130 150 170 200 230 FFFF FFFF
-		// vox threshold disable  20 40 60 80 100 120 140 160 190 220 FFFF FFFF
-		//
-		#ifdef ENABLE_VOX_MORE_SENSITIVE
-			// more sensitive
-			threshold_enable  = g_eeprom.calib.vox[0].threshold[level] / 3;
-			threshold_disable = (threshold_enable > 13) ? threshold_enable - 10 : 3;
-		#else
-			threshold_enable  = g_eeprom.calib.vox[0].threshold[level];
-			threshold_disable = g_eeprom.calib.vox[1].threshold[level];
-		#endif
-
-		BK4819_EnableVox(threshold_enable, threshold_disable);
-
-		BK4819_write_reg(0x3F, BK4819_read_reg(0x3F) | BK4819_REG_3F_VOX_FOUND | BK4819_REG_3F_VOX_LOST);
-	}
-#endif
-
-void RADIO_ConfigureSquelch(vfo_info_t *p_vfo)
+void RADIO_ConfigureSquelchAndOutputPower(VFO_Info_t *pInfo)
 {
-	const unsigned int squelch_level = (p_vfo->channel.squelch_level > 0) ? p_vfo->channel.squelch_level : g_eeprom.config.setting.squelch_level;
 
-	// note that 'noise' and 'glitch' values are inverted compared to 'rssi' values
 
-	if (squelch_level == 0)
+	// *******************************
+	// squelch
+
+	FREQUENCY_Band_t Band = FREQUENCY_GetBand(pInfo->pRX->Frequency);
+	uint16_t Base = (Band < BAND4_174MHz) ? 0x1E60 : 0x1E00;
+
+	if (gEeprom.SQUELCH_LEVEL == 0)
 	{	// squelch == 0 (off)
-		p_vfo->squelch_open_rssi_thresh    = 0;     // 0 ~ 255
-		p_vfo->squelch_close_rssi_thresh   = 0;     // 0 ~ 255
+		pInfo->SquelchOpenRSSIThresh    = 0;     // 0 ~ 255
+		pInfo->SquelchOpenNoiseThresh   = 127;   // 127 ~ 0
+		pInfo->SquelchCloseGlitchThresh = 255;   // 255 ~ 0
 
-		p_vfo->squelch_open_noise_thresh   = 127;   // 127 ~ 0
-		p_vfo->squelch_close_noise_thresh  = 127;   // 127 ~ 0
-
-		p_vfo->squelch_open_glitch_thresh  = 255;   // 255 ~ 0
-		p_vfo->squelch_close_glitch_thresh = 255;   // 255 ~ 0
+		pInfo->SquelchCloseRSSIThresh   = 0;     // 0 ~ 255
+		pInfo->SquelchCloseNoiseThresh  = 127;   // 127 ~ 0
+		pInfo->SquelchOpenGlitchThresh  = 255;   // 255 ~ 0
 	}
 	else
 	{	// squelch >= 1
+		Base += gEeprom.SQUELCH_LEVEL;                                        // my eeprom squelch-1
+																			  // VHF   UHF
+		EEPROM_ReadBuffer(Base + 0x00, &pInfo->SquelchOpenRSSIThresh,    1);  //  50    10
+		EEPROM_ReadBuffer(Base + 0x10, &pInfo->SquelchCloseRSSIThresh,   1);  //  40     5
 
-		// my calibration data
-		//
-		// bands 4567
-		// 0A 4B 53 56 59 5C 5F 62 64 66 FF FF FF FF FF FF   // open rssi
-		// 05 46 50 53 56 59 5C 5F 62 64 FF FF FF FF FF FF   // close rssi
-		// 5A 2D 29 26 23 20 1D 1A 17 14 FF FF FF FF FF FF   // open noise
-		// 64 30 2D 29 26 23 20 1D 1A 17 FF FF FF FF FF FF   // close noise
-		// 5A 14 11 0E 0B 08 03 02 02 02 FF FF FF FF FF FF   // open glitch
-		// 64 11 0E 0B 08 05 05 04 04 04 FF FF FF FF FF FF   // close glitch
-		//
-		// bands 123
-		// 32 68 6B 6E 6F 72 75 77 79 7B FF FF FF FF FF FF   // open rssi
-		// 28 64 67 6A 6C 6E 71 73 76 78 FF FF FF FF FF FF   // close rssi
-		// 41 32 2D 28 24 21 1E 1A 17 16 FF FF FF FF FF FF   // open noise
-		// 46 37 32 2D 28 25 22 1E 1B 19 FF FF FF FF FF FF   // close noise
-		// 5A 19 0F 0A 09 08 07 06 05 04 FF FF FF FF FF FF   // open glitch
-		// 64 1E 14 0F 0D 0C 0B 0A 09 08 FF FF FF FF FF FF   // close glitch
+		EEPROM_ReadBuffer(Base + 0x20, &pInfo->SquelchOpenNoiseThresh,   1);  //  65    90
+		EEPROM_ReadBuffer(Base + 0x30, &pInfo->SquelchCloseNoiseThresh,  1);  //  70   100
 
-		unsigned int band = (unsigned int)FREQUENCY_GetBand(p_vfo->p_rx->frequency);
-		band = (band < BAND4_174MHz) ? 1 : 0;
+		EEPROM_ReadBuffer(Base + 0x40, &pInfo->SquelchCloseGlitchThresh, 1);  //  90    90
+		EEPROM_ReadBuffer(Base + 0x50, &pInfo->SquelchOpenGlitchThresh,  1);  // 100   100
 
-		p_vfo->squelch_open_rssi_thresh    = g_eeprom.calib.squelch_band[band].open_rssi_thresh[squelch_level];
-		p_vfo->squelch_close_rssi_thresh   = g_eeprom.calib.squelch_band[band].close_rssi_thresh[squelch_level];
-
-		p_vfo->squelch_open_noise_thresh   = g_eeprom.calib.squelch_band[band].open_noise_thresh[squelch_level];
-		p_vfo->squelch_close_noise_thresh  = g_eeprom.calib.squelch_band[band].close_noise_thresh[squelch_level];
-
-		p_vfo->squelch_open_glitch_thresh  = g_eeprom.calib.squelch_band[band].open_glitch_thresh[squelch_level];
-		p_vfo->squelch_close_glitch_thresh = g_eeprom.calib.squelch_band[band].close_glitch_thresh[squelch_level];
-
-		// *********
-
-		int16_t rssi_open    = p_vfo->squelch_open_rssi_thresh;      // 0 ~ 255
-		int16_t rssi_close   = p_vfo->squelch_close_rssi_thresh;     // 0 ~ 255
-
-		int16_t noise_open   = p_vfo->squelch_open_noise_thresh;     // 127 ~ 0
-		int16_t noise_close  = p_vfo->squelch_close_noise_thresh;    // 127 ~ 0
-
-		int16_t glitch_open  = p_vfo->squelch_open_glitch_thresh;    // 255 ~ 0
-		int16_t glitch_close = p_vfo->squelch_close_glitch_thresh;   // 255 ~ 0
-
-		// *********
+		uint16_t rssi_open    = pInfo->SquelchOpenRSSIThresh;
+		uint16_t rssi_close   = pInfo->SquelchCloseRSSIThresh;
+		uint16_t noise_open   = pInfo->SquelchOpenNoiseThresh;
+		uint16_t noise_close  = pInfo->SquelchCloseNoiseThresh;
+		uint16_t glitch_open  = pInfo->SquelchOpenGlitchThresh;
+		uint16_t glitch_close = pInfo->SquelchCloseGlitchThresh;
 
 		#if ENABLE_SQUELCH_MORE_SENSITIVE
 			// make squelch a little more sensitive
 			//
-			// getting the best general settings here is experimental, bare with me
+			// getting the best setting here is still experimental, bare with me
+			//
+			// note that 'noise' and 'glitch' values are inverted compared to 'rssi' values
 
 			#if 0
 				rssi_open   = (rssi_open   * 8) / 9;
@@ -522,415 +456,303 @@ void RADIO_ConfigureSquelch(vfo_info_t *p_vfo)
 			glitch_open = (glitch_open * 4) / 3;
 		#endif
 
-		// *********
+		rssi_close   = (rssi_open   *  9) / 10;
+		noise_close  = (noise_open  * 10) / 9;
+		glitch_close = (glitch_open * 10) / 9;
+
 		// ensure the 'close' threshold is lower than the 'open' threshold
-		// ie, maintain a minimum level of hysteresis
+		if (rssi_close   == rssi_open   && rssi_close   >= 2)
+			rssi_close -= 2;
+		if (noise_close  == noise_open  && noise_close  <= 125)
+			noise_close += 2;
+		if (glitch_close == glitch_open && glitch_close <= 253)
+			glitch_close += 2;
 
-		rssi_close   = (rssi_open   * 4) / 6;
-		noise_close  = (noise_open  * 6) / 4;
-		glitch_close = (glitch_open * 6) / 4;
-
-		if (rssi_open  <  8)
-			rssi_open  =  8;
-		if (rssi_close > (rssi_open   - 8))
-			rssi_close =  rssi_open   - 8;
-
-		if (noise_open  > (127 - 4))
-			noise_open  =  127 - 4;
-		if (noise_close < (noise_open  + 4))
-			noise_close =  noise_open  + 4;
-
-		if (glitch_open  > (255 - 8))
-			glitch_open  =  255 - 8;
-		if (glitch_close < (glitch_open + 8))
-			glitch_close =  glitch_open + 8;
-
-		// *********
-
-		p_vfo->squelch_open_rssi_thresh    = (rssi_open    > 255) ? 255 : (rssi_open    < 0) ? 0 : rssi_open;
-		p_vfo->squelch_close_rssi_thresh   = (rssi_close   > 255) ? 255 : (rssi_close   < 0) ? 0 : rssi_close;
-
-		p_vfo->squelch_open_noise_thresh   = (noise_open   > 127) ? 127 : (noise_open   < 0) ? 0 : noise_open;
-		p_vfo->squelch_close_noise_thresh  = (noise_close  > 127) ? 127 : (noise_close  < 0) ? 0 : noise_close;
-
-		p_vfo->squelch_open_glitch_thresh  = (glitch_open  > 255) ? 255 : (glitch_open  < 0) ? 0 : glitch_open;
-		p_vfo->squelch_close_glitch_thresh = (glitch_close > 255) ? 255 : (glitch_close < 0) ? 0 : glitch_close;
+		pInfo->SquelchOpenRSSIThresh    = (rssi_open    > 255) ? 255 : rssi_open;
+		pInfo->SquelchCloseRSSIThresh   = (rssi_close   > 255) ? 255 : rssi_close;
+		pInfo->SquelchOpenNoiseThresh   = (noise_open   > 127) ? 127 : noise_open;
+		pInfo->SquelchCloseNoiseThresh  = (noise_close  > 127) ? 127 : noise_close;
+		pInfo->SquelchOpenGlitchThresh  = (glitch_open  > 255) ? 255 : glitch_open;
+		pInfo->SquelchCloseGlitchThresh = (glitch_close > 255) ? 255 : glitch_close;
 	}
+
+	// *******************************
+	// output power
+
+	Band = FREQUENCY_GetBand(pInfo->pTX->Frequency);
+
+	uint8_t Txp[3];
+	EEPROM_ReadBuffer(0x1ED0 + (Band * 16) + (pInfo->OUTPUT_POWER * 3), Txp, 3);
+
+#ifdef ENABLE_REDUCE_LOW_MID_TX_POWER
+	// make low and mid even lower
+	if (pInfo->OUTPUT_POWER == OUTPUT_POWER_LOW) {
+		Txp[0] /= 5;
+		Txp[1] /= 5;
+		Txp[2] /= 5;
+	}
+	else if (pInfo->OUTPUT_POWER == OUTPUT_POWER_MID){
+		Txp[0] /= 3;
+		Txp[1] /= 3;
+		Txp[2] /= 3;
+	}
+#endif
+
+	pInfo->TXP_CalculatedSetting = FREQUENCY_CalculateOutputPower(
+		Txp[0],
+		Txp[1],
+		Txp[2],
+		 frequencyBandTable[Band].lower,
+		(frequencyBandTable[Band].lower + frequencyBandTable[Band].upper) / 2,
+		 frequencyBandTable[Band].upper,
+		pInfo->pTX->Frequency);
+
+	// *******************************
 }
 
-void RADIO_ConfigureTXPower(vfo_info_t *p_vfo)
+void RADIO_ApplyOffset(VFO_Info_t *pInfo)
 {
-	// my eeprom calibration data
-	//
-	// 1ED0    32 32 32   64 64 64   8C 8C 8C   FF FF FF FF FF FF FF ..  50 MHz
-	// 1EE0    32 32 32   64 64 64   8C 8C 8C   FF FF FF FF FF FF FF .. 108 MHz
-	// 1EF0    5F 5F 5F   69 69 69   91 91 8F   FF FF FF FF FF FF FF .. 137 MHz
-	// 1F00    32 32 32   64 64 64   8C 8C 8C   FF FF FF FF FF FF FF .. 174 MHz
-	// 1F10    5A 5A 5A   64 64 64   82 82 82   FF FF FF FF FF FF FF .. 350 MHz
-	// 1F20    5A 5A 5A   64 64 64   8F 91 8A   FF FF FF FF FF FF FF .. 400 MHz
-	// 1F30    32 32 32   64 64 64   8C 8C 8C   FF FF FF FF FF FF FF .. 470 MHz
+	uint32_t Frequency = pInfo->freq_config_RX.Frequency;
 
-	const unsigned int band = (unsigned int)FREQUENCY_GetBand(p_vfo->p_tx->frequency);
-	uint8_t tx_power[3];
-
-	memcpy(tx_power, g_eeprom.calib.tx_band_power[band].level[p_vfo->channel.tx_power], 3);
-
-	#ifndef ENABLE_TX_POWER_CAL_MENU
-
-		#ifdef ENABLE_TX_POWER_FIX
-			switch (p_vfo->channel.tx_power)
-			{
-				case OUTPUT_POWER_LOW:		// ~ 10mW
-//					if (p_vfo->p_tx->frequency <= 26000000)
-//					{	// 137 ~ 174
-//						tx_power[0] = 0x13;
-//						tx_power[1] = 0x13;
-//						tx_power[2] = 0x13;
-//					}
-//					else
-//					{	// 400 ~ 470
-						tx_power[0] = 0x13;
-						tx_power[1] = 0x13;
-						tx_power[2] = 0x13;
-//					}
-					break;
-
-				default:
-				case OUTPUT_POWER_MID:		// ~ 500mW
-					if (p_vfo->p_tx->frequency <= 26000000)
-					{	// 137 ~ 174
-						tx_power[0] = 0x29;
-						tx_power[1] = 0x29;
-						tx_power[2] = 0x29;
-					}
-					else
-					{	// 400 ~ 470
-						tx_power[0] = 0x37;
-						tx_power[1] = 0x37;
-						tx_power[2] = 0x37;
-					}
-					break;
-
-				case OUTPUT_POWER_HIGH:		// ~ 4W
-					if (p_vfo->p_tx->frequency <= 26000000)
-					{	// 137 ~ 174
-						tx_power[0] = 0x7F;
-						tx_power[1] = 0x84;
-						tx_power[2] = 0x8C;
-					}
-					else
-					{	// 400 ~ 470
-						tx_power[0] = 0x96;
-						tx_power[1] = 0x96;
-						tx_power[2] = 0x8C;
-					}
-					break;
-			}
-		#endif
-
-	#endif
-
-	if (p_vfo->channel.tx_power == OUTPUT_POWER_USER)
-		p_vfo->txp_reg_value = 8 + (p_vfo->channel.tx_power_user * 1);
-	else
-		p_vfo->txp_reg_value = FREQUENCY_CalculateOutputPower(tx_power[0], tx_power[1], tx_power[2], p_vfo->p_tx->frequency);
-}
-
-void RADIO_apply_offset(vfo_info_t *p_vfo, const bool set_pees)
-{
-	uint32_t Frequency = p_vfo->freq_config_rx.frequency;
-
-	switch (p_vfo->channel.tx_offset_dir)
+	switch (pInfo->TX_OFFSET_FREQUENCY_DIRECTION)
 	{
-		case TX_OFFSET_FREQ_DIR_OFF:
+		case TX_OFFSET_FREQUENCY_DIRECTION_OFF:
 			break;
-		case TX_OFFSET_FREQ_DIR_ADD:
-			Frequency += p_vfo->channel.tx_offset;
+		case TX_OFFSET_FREQUENCY_DIRECTION_ADD:
+			Frequency += pInfo->TX_OFFSET_FREQUENCY;
 			break;
-		case TX_OFFSET_FREQ_DIR_SUB:
-			Frequency -= p_vfo->channel.tx_offset;
+		case TX_OFFSET_FREQUENCY_DIRECTION_SUB:
+			Frequency -= pInfo->TX_OFFSET_FREQUENCY;
 			break;
 	}
 
-	if (Frequency < FREQ_BAND_TABLE[0].lower)
-		Frequency = FREQ_BAND_TABLE[0].lower;
-	else
-	if (Frequency > FREQ_BAND_TABLE[ARRAY_SIZE(FREQ_BAND_TABLE) - 1].upper)
-		Frequency = FREQ_BAND_TABLE[ARRAY_SIZE(FREQ_BAND_TABLE) - 1].upper;
+	if (Frequency < frequencyBandTable[0].lower)
+		Frequency = frequencyBandTable[0].lower;
+	else if (Frequency > frequencyBandTable[BAND_N_ELEM - 1].upper)
+		Frequency = frequencyBandTable[BAND_N_ELEM - 1].upper;
 
-	p_vfo->freq_config_tx.frequency = Frequency;
-
-	if (set_pees)
-	{
-		if (!p_vfo->channel.frequency_reverse)
-		{
-			p_vfo->p_rx = &p_vfo->freq_config_rx;
-			p_vfo->p_tx = &p_vfo->freq_config_tx;
-		}
-		else
-		{
-			p_vfo->p_rx = &p_vfo->freq_config_tx;
-			p_vfo->p_tx = &p_vfo->freq_config_rx;
-		}
-	}
+	pInfo->freq_config_TX.Frequency = Frequency;
 }
 
-void RADIO_select_vfos(void)
+static void RADIO_SelectCurrentVfo(void)
 {
-	g_eeprom.config.setting.tx_vfo_num = get_TX_VFO();
-	g_rx_vfo_num = (g_eeprom.config.setting.cross_vfo == CROSS_BAND_OFF) ? g_eeprom.config.setting.tx_vfo_num : (g_eeprom.config.setting.tx_vfo_num + 1) & 1u;
-
-	g_tx_vfo = &g_vfo_info[g_eeprom.config.setting.tx_vfo_num];
-	g_rx_vfo = &g_vfo_info[g_rx_vfo_num];
-
- 	g_current_vfo = (g_eeprom.config.setting.cross_vfo == CROSS_BAND_OFF) ? g_rx_vfo : &g_vfo_info[g_eeprom.config.setting.tx_vfo_num];
+	// if crossband is active and DW not the gCurrentVfo is gTxVfo (gTxVfo/TX_VFO is only ever changed by the user)
+	// otherwise it is set to gRxVfo which is set to gTxVfo in RADIO_SelectVfos
+	// so in the end gCurrentVfo is equal to gTxVfo unless dual watch changes it on incomming transmition (again, this can only happen when XB off)
+	// note: it is called only in certain situations so could be not up-to-date
+ 	gCurrentVfo = (gEeprom.CROSS_BAND_RX_TX == CROSS_BAND_OFF || gEeprom.DUAL_WATCH != DUAL_WATCH_OFF) ? gRxVfo : gTxVfo;
 }
 
-BK4819_filter_bandwidth_t RADIO_set_bandwidth(BK4819_filter_bandwidth_t bandwidth, const int mode)
+void RADIO_SelectVfos(void)
 {
-	switch (bandwidth)
+	// if crossband without DW is used then RX_VFO is the opposite to the TX_VFO
+	gEeprom.RX_VFO = (gEeprom.CROSS_BAND_RX_TX == CROSS_BAND_OFF || gEeprom.DUAL_WATCH != DUAL_WATCH_OFF) ? gEeprom.TX_VFO : !gEeprom.TX_VFO;
+
+	gTxVfo = &gEeprom.VfoInfo[gEeprom.TX_VFO];
+	gRxVfo = &gEeprom.VfoInfo[gEeprom.RX_VFO];
+
+	RADIO_SelectCurrentVfo();
+}
+
+void RADIO_SetupRegisters(bool switchToForeground)
+{
+	BK4819_FilterBandwidth_t Bandwidth = gRxVfo->CHANNEL_BANDWIDTH;
+
+	AUDIO_AudioPathOff();
+
+	gEnableSpeaker = false;
+
+	BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
+
+	switch (Bandwidth)
 	{
 		default:
-			bandwidth = BK4819_FILTER_BW_WIDE;
-
-			// Fallthrough
-
+			Bandwidth = BK4819_FILTER_BW_WIDE;
+			[[fallthrough]];
 		case BK4819_FILTER_BW_WIDE:
 		case BK4819_FILTER_BW_NARROW:
-		case BK4819_FILTER_BW_NARROWER:
+			#ifdef ENABLE_AM_FIX
+//				BK4819_SetFilterBandwidth(Bandwidth, gRxVfo->Modulation == MODULATION_AM && gSetting_AM_fix);
+				BK4819_SetFilterBandwidth(Bandwidth, true);
+			#else
+				BK4819_SetFilterBandwidth(Bandwidth, false);
+			#endif
 			break;
 	}
 
-	switch (mode)
+	BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
+
+	BK4819_SetupPowerAmplifier(0, 0);
+
+	BK4819_ToggleGpioOut(BK4819_GPIO1_PIN29_PA_ENABLE, false);
+
+	while (1)
 	{
-		case MOD_MODE_FM:
-			//BK4819_set_AFC(2);
-			BK4819_set_AFC(0);
+		const uint16_t Status = BK4819_ReadRegister(BK4819_REG_0C);
+		if ((Status & 1u) == 0) // INTERRUPT REQUEST
 			break;
 
-		case MOD_MODE_AM:
-			//BK4819_set_AFC(2);
-			BK4819_set_AFC(0);
-			break;
-
-		case MOD_MODE_DSB:
-			bandwidth = BK4819_FILTER_BW_NARROWER;
-			BK4819_set_AFC(0);
-			break;
-	}
-
-	BK4819_SetFilterBandwidth(bandwidth);
-
-	return bandwidth;
-}
-
-void RADIO_setup_registers(bool switch_to_function_foreground)
-{
-	BK4819_filter_bandwidth_t Bandwidth = g_rx_vfo->channel.channel_bandwidth;
-	uint16_t                  interrupt_mask;
-	uint32_t                  Frequency;
-
-	if (!g_monitor_enabled)
-	{
-		#ifdef ENABLE_FMRADIO
-			if (!g_fm_radio_mode && g_request_display_screen != DISPLAY_FM)
-		#endif
-				GPIO_ClearBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);   // speaker off
-	}
-
-	// green LED off
-	BK4819_set_GPIO_pin(BK4819_GPIO6_PIN2_GREEN, false);
-
-	Bandwidth = RADIO_set_bandwidth(Bandwidth, g_rx_vfo->channel.mod_mode);
-
-	BK4819_write_reg(0x30, 0);
-	BK4819_write_reg(0x30,
-		BK4819_REG_30_ENABLE_VCO_CALIB |
-//		BK4819_REG_30_ENABLE_UNKNOWN   |
-		BK4819_REG_30_ENABLE_RX_LINK   |
-		BK4819_REG_30_ENABLE_AF_DAC    |
-		BK4819_REG_30_ENABLE_DISC_MODE |
-		BK4819_REG_30_ENABLE_PLL_VCO   |
-//		BK4819_REG_30_ENABLE_PA_GAIN   |
-//		BK4819_REG_30_ENABLE_MIC_ADC   |
-//		BK4819_REG_30_ENABLE_TX_DSP    |
-		BK4819_REG_30_ENABLE_RX_DSP    |
-	0);
-
-	BK4819_set_GPIO_pin(BK4819_GPIO5_PIN1_RED, false);         // red LED off
-	BK4819_SetupPowerAmplifier(0, 0);                          //
-	BK4819_set_GPIO_pin(BK4819_GPIO1_PIN29_PA_ENABLE, false);  // PA off
-
-	do {	// wait for interrupts to clear
-		const uint16_t int_bits = BK4819_read_reg(0x0C);
-		if ((int_bits & (1u << 0)) == 0)
-			break;
-		BK4819_write_reg(0x02, 0);   // clear the interrupt bits ?
+		BK4819_WriteRegister(BK4819_REG_02, 0);
 		SYSTEM_DelayMs(1);
-	} while (1);
-	BK4819_write_reg(0x3F, 0);       // disable interrupts
+	}
+	BK4819_WriteRegister(BK4819_REG_3F, 0);
 
+	// mic gain 0.5dB/step 0 to 31
+	BK4819_WriteRegister(BK4819_REG_7D, 0xE940 | (gEeprom.MIC_SENSITIVITY_TUNING & 0x1f));
+
+	uint32_t Frequency;
 	#ifdef ENABLE_NOAA
-		if (IS_NOAA_CHANNEL(g_rx_vfo->channel_save) && g_noaa_mode)
-			Frequency = NOAA_FREQUENCY_TABLE[g_noaa_channel];
+		if (!IS_NOAA_CHANNEL(gRxVfo->CHANNEL_SAVE) || !gIsNoaaMode)
+			Frequency = gRxVfo->pRX->Frequency;
 		else
+			Frequency = NoaaFrequencyTable[gNoaaChannel];
+	#else
+		Frequency = gRxVfo->pRX->Frequency;
 	#endif
-			Frequency = g_rx_vfo->p_rx->frequency;
+	BK4819_SetFrequency(Frequency);
 
-	// set VCO/PLL frequency
-	BK4819_set_rf_frequency(Frequency, true);
-	BK4819_set_rf_filter_path(Frequency);
-
-	// set squelch level
 	BK4819_SetupSquelch(
-		g_rx_vfo->squelch_open_rssi_thresh,    g_rx_vfo->squelch_close_rssi_thresh,
-		g_rx_vfo->squelch_open_noise_thresh,   g_rx_vfo->squelch_close_noise_thresh,
-		g_rx_vfo->squelch_close_glitch_thresh, g_rx_vfo->squelch_open_glitch_thresh);
+		gRxVfo->SquelchOpenRSSIThresh,    gRxVfo->SquelchCloseRSSIThresh,
+		gRxVfo->SquelchOpenNoiseThresh,   gRxVfo->SquelchCloseNoiseThresh,
+		gRxVfo->SquelchCloseGlitchThresh, gRxVfo->SquelchOpenGlitchThresh);
 
-	// enable the RX front end
-	BK4819_set_GPIO_pin(BK4819_GPIO0_PIN28_RX_ENABLE, true);
+	BK4819_PickRXFilterPathBasedOnFrequency(Frequency);
+
+	// what does this in do ?
+	BK4819_ToggleGpioOut(BK4819_GPIO0_PIN28_RX_ENABLE, true);
 
 	// AF RX Gain and DAC
-//	if (g_rx_vfo->channel.mod_mode != MOD_MODE_FM)
-//	{
-//		BK4819_write_reg(0x48, 0xB3A8);   // 1011 0011 1010 1000
-//	}
-//	else
+	//BK4819_WriteRegister(BK4819_REG_48, 0xB3A8);  // 1011 00 111010 1000
+	BK4819_WriteRegister(BK4819_REG_48,
+		(11u << 12)                 |     // ??? .. 0 ~ 15, doesn't seem to make any difference
+		( 0u << 10)                 |     // AF Rx Gain-1
+		(gEeprom.VOLUME_GAIN << 4) |     // AF Rx Gain-2
+		(gEeprom.DAC_GAIN    << 0));     // AF DAC Gain (after Gain-1 and Gain-2)
+
+
+	uint16_t InterruptMask = BK4819_REG_3F_SQUELCH_FOUND | BK4819_REG_3F_SQUELCH_LOST;
+
+	#ifdef ENABLE_NOAA
+		if (!IS_NOAA_CHANNEL(gRxVfo->CHANNEL_SAVE))
+	#endif
 	{
-		BK4819_write_reg(0x48,
-			(11u << 12)                        |     // ??? .. 0 ~ 15, doesn't seem to make any difference
-			( 0u << 10)                        |     // AF Rx Gain-1
-			(g_eeprom.calib.volume_gain << 4) |     // AF Rx Gain-2
-			(g_eeprom.calib.dac_gain    << 0));     // AF DAC Gain (after Gain-1 and Gain-2)
-	}
-
-	if (!g_monitor_enabled)
-	{	// set modulation mode FM, AM etc
-		#ifdef ENABLE_FMRADIO
-			if (!g_fm_radio_mode && g_request_display_screen != DISPLAY_FM)
-		#endif
-		{
-			#ifdef ENABLE_VOICE
-				#ifdef MUTE_AUDIO_FOR_VOICE
-					if (g_voice_write_index == 0)
-						AUDIO_set_mod_mode(g_rx_vfo->channel.mod_mode);
-				#else
-					AUDIO_set_mod_mode(g_rx_vfo->channel.mod_mode);
-				#endif
-			#else
-				AUDIO_set_mod_mode(g_rx_vfo->channel.mod_mode);
-			#endif
-		}
-	}
-
-	interrupt_mask = BK4819_REG_3F_SQUELCH_FOUND | BK4819_REG_3F_SQUELCH_LOST;
-
-	if (IS_NOT_NOAA_CHANNEL(g_rx_vfo->channel_save))
-	{
-		if (g_rx_vfo->channel.mod_mode == MOD_MODE_FM)
+		if (gRxVfo->Modulation == MODULATION_FM)
 		{	// FM
-			uint8_t code_type = g_selected_code_type;
-			uint8_t code      = g_selected_code;
+			uint8_t CodeType = gRxVfo->pRX->CodeType;
+			uint8_t Code     = gRxVfo->pRX->Code;
 
-			if (g_css_scan_mode == CSS_SCAN_MODE_OFF)
-			{
-				code_type = g_rx_vfo->p_rx->code_type;
-				code      = g_rx_vfo->p_rx->code;
-			}
-
-			switch (code_type)
+			switch (CodeType)
 			{
 				default:
-				case CODE_TYPE_NONE:
-					BK4819_set_CTCSS_freq(670);
-					BK4819_set_tail_detection(550);		// QS's 55Hz tone method
+				case CODE_TYPE_OFF:
+					BK4819_SetCTCSSFrequency(670);
 
-					interrupt_mask |= BK4819_REG_3F_CxCSS_TAIL;
+					//#ifndef ENABLE_CTCSS_TAIL_PHASE_SHIFT
+						BK4819_SetTailDetection(550);		// QS's 55Hz tone method
+					//#else
+					//	BK4819_SetTailDetection(670);       // 67Hz
+					//#endif
+
+					InterruptMask = BK4819_REG_3F_CxCSS_TAIL | BK4819_REG_3F_SQUELCH_FOUND | BK4819_REG_3F_SQUELCH_LOST;
 					break;
 
 				case CODE_TYPE_CONTINUOUS_TONE:
-					BK4819_set_CTCSS_freq(CTCSS_TONE_LIST[code]);
+					BK4819_SetCTCSSFrequency(CTCSS_Options[Code]);
 
-//					#ifdef ENABLE_CTCSS_TAIL_PHASE_SHIFT
-//						BK4819_set_tail_detection(CTCSS_TONE_LIST[code]); // doesn't work in RX mode
-//					#else
-//						BK4819_set_tail_detection(550);		// QS's 55Hz tone method
-//					#endif
+					//#ifndef ENABLE_CTCSS_TAIL_PHASE_SHIFT
+						BK4819_SetTailDetection(550);		// QS's 55Hz tone method
+					//#else
+					//	BK4819_SetTailDetection(CTCSS_Options[Code]);
+					//#endif
 
-					interrupt_mask |=
-						BK4819_REG_3F_CxCSS_TAIL |
-						BK4819_REG_3F_CTCSS_FOUND |
-						BK4819_REG_3F_CTCSS_LOST;
+					InterruptMask = 0
+						| BK4819_REG_3F_CxCSS_TAIL
+						| BK4819_REG_3F_CTCSS_FOUND
+						| BK4819_REG_3F_CTCSS_LOST
+						| BK4819_REG_3F_SQUELCH_FOUND
+						| BK4819_REG_3F_SQUELCH_LOST;
 
 					break;
 
 				case CODE_TYPE_DIGITAL:
 				case CODE_TYPE_REVERSE_DIGITAL:
-					BK4819_set_CDCSS_code(DCS_GetGolayCodeWord(code_type, code));
-
-					interrupt_mask |=
-						BK4819_REG_3F_CxCSS_TAIL |
-						BK4819_REG_3F_CDCSS_FOUND |
-						BK4819_REG_3F_CDCSS_LOST;
-
+					BK4819_SetCDCSSCodeWord(DCS_GetGolayCodeWord(CodeType, Code));
+					InterruptMask = 0
+						| BK4819_REG_3F_CxCSS_TAIL
+						| BK4819_REG_3F_CDCSS_FOUND
+						| BK4819_REG_3F_CDCSS_LOST
+						| BK4819_REG_3F_SQUELCH_FOUND
+						| BK4819_REG_3F_SQUELCH_LOST;
 					break;
 			}
 
-			if (g_eeprom.config.setting.enable_scrambler)
-				BK4819_set_scrambler(g_rx_vfo->channel.scrambler);
+			if (gRxVfo->SCRAMBLING_TYPE > 0 && gSetting_ScrambleEnable)
+				BK4819_EnableScramble(gRxVfo->SCRAMBLING_TYPE - 1);
 			else
-				BK4819_set_scrambler(0);
+				BK4819_DisableScramble();
 		}
 	}
 	#ifdef ENABLE_NOAA
 		else
 		{
-			BK4819_set_CTCSS_freq(0);      // NOAA 1050Hz stuff
-			interrupt_mask |= BK4819_REG_3F_CTCSS_FOUND | BK4819_REG_3F_CTCSS_LOST;
+			BK4819_SetCTCSSFrequency(2625);
+			InterruptMask = 0
+				| BK4819_REG_3F_CTCSS_FOUND
+				| BK4819_REG_3F_CTCSS_LOST
+				| BK4819_REG_3F_SQUELCH_FOUND
+				| BK4819_REG_3F_SQUELCH_LOST;
 		}
 	#endif
 
-	#ifdef ENABLE_VOX
-		if (
-			#ifdef ENABLE_FMRADIO
-				!g_fm_radio_mode &&
-			#endif
-			g_eeprom.config.setting.vox_enabled &&
-			IS_NOT_NOAA_CHANNEL(g_rx_vfo->channel_save) &&
-			g_rx_vfo->channel.mod_mode == MOD_MODE_FM)
-		{
-			RADIO_enable_vox(g_eeprom.config.setting.vox_level);
-			interrupt_mask |= BK4819_REG_3F_VOX_FOUND | BK4819_REG_3F_VOX_LOST;
-		}
-		else
-	#endif
-			BK4819_DisableVox();
+#ifdef ENABLE_VOX
+	if (gEeprom.VOX_SWITCH  && gCurrentVfo->Modulation == MODULATION_FM
+#ifdef ENABLE_NOAA
+		&& !IS_NOAA_CHANNEL(gCurrentVfo->CHANNEL_SAVE)
+#endif
+#ifdef ENABLE_FMRADIO
+		&& !gFmRadioMode
+#endif
+	){
+		BK4819_EnableVox(gEeprom.VOX1_THRESHOLD, gEeprom.VOX0_THRESHOLD);
+		InterruptMask |= BK4819_REG_3F_VOX_FOUND | BK4819_REG_3F_VOX_LOST;
+	}
+	else
+#endif
+	{
+		BK4819_DisableVox();
+	}
 
 	// RX expander
-	BK4819_SetCompander((g_rx_vfo->channel.mod_mode == MOD_MODE_FM) ? g_rx_vfo->channel.compand : COMPAND_OFF);
+	BK4819_SetCompander((gRxVfo->Modulation == MODULATION_FM && gRxVfo->Compander >= 2) ? gRxVfo->Compander : 0);
 
-	BK4819_EnableDTMF();
-	interrupt_mask |= BK4819_REG_3F_DTMF_5TONE_FOUND;
+#if 0
+	if (!gRxVfo->DTMF_DECODING_ENABLE && !gSetting_KILLED)
+	{
+		BK4819_DisableDTMF();
+	}
+	else
+	{
+		BK4819_EnableDTMF();
+		InterruptMask |= BK4819_REG_3F_DTMF_5TONE_FOUND;
+	}
+#else
+	BK4819_DisableDTMF();
 
-	#ifdef ENABLE_MDC1200
-		BK4819_enable_mdc1200_rx(true);
-		interrupt_mask |= BK4819_REG_3F_FSK_RX_SYNC | BK4819_REG_3F_FSK_RX_FINISHED | BK4819_REG_3F_FSK_FIFO_ALMOST_FULL;
-	#endif
+	if (gCurrentFunction != FUNCTION_TRANSMIT) {
+		BK4819_EnableDTMF();
+		InterruptMask |= BK4819_REG_3F_DTMF_5TONE_FOUND;
+	}
+#endif
 
-	// enable BK4819 interrupts
-	BK4819_write_reg(0x3F, interrupt_mask);
+	RADIO_SetupAGC(gRxVfo->Modulation == MODULATION_AM, false);
+
+	// enable/disable BK4819 selected interrupts
+	BK4819_WriteRegister(BK4819_REG_3F, InterruptMask);
 
 	FUNCTION_Init();
 
-	if (switch_to_function_foreground)
+	if (switchToForeground)
 		FUNCTION_Select(FUNCTION_FOREGROUND);
-
-//	if (g_monitor_enabled)
-//		GPIO_SetBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-
-	#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//		UART_printf("setup-reg %4u.%05u MHz, %u\r\n", Frequency / 100000, Frequency % 100000, Bandwidth);
-	#endif
 }
 
 #ifdef ENABLE_NOAA
@@ -938,17 +760,17 @@ void RADIO_setup_registers(bool switch_to_function_foreground)
 	{
 		uint8_t ChanAB;
 
-		g_update_status = true;
+		gUpdateStatus = true;
 
-		if (g_eeprom.config.setting.noaa_auto_scan)
+		if (gEeprom.NOAA_AUTO_SCAN)
 		{
-			if (g_eeprom.config.setting.dual_watch != DUAL_WATCH_OFF)
+			if (gEeprom.DUAL_WATCH != DUAL_WATCH_OFF)
 			{
-				if (IS_NOT_NOAA_CHANNEL(g_eeprom.config.setting.indices.vfo[0].screen))
+				if (!IS_NOAA_CHANNEL(gEeprom.ScreenChannel[0]))
 				{
-					if (IS_NOT_NOAA_CHANNEL(g_eeprom.config.setting.indices.vfo[1].screen))
+					if (!IS_NOAA_CHANNEL(gEeprom.ScreenChannel[1]))
 					{
-						g_noaa_mode = false;
+						gIsNoaaMode = false;
 						return;
 					}
 					ChanAB = 1;
@@ -956,321 +778,310 @@ void RADIO_setup_registers(bool switch_to_function_foreground)
 				else
 					ChanAB = 0;
 
-				if (!g_noaa_mode)
-					g_noaa_channel = g_vfo_info[ChanAB].channel_save - NOAA_CHANNEL_FIRST;
+				if (!gIsNoaaMode)
+					gNoaaChannel = gEeprom.VfoInfo[ChanAB].CHANNEL_SAVE - NOAA_CHANNEL_FIRST;
 
-				g_noaa_mode = true;
+				gIsNoaaMode = true;
 				return;
 			}
 
-			if (g_rx_vfo->channel_save >= NOAA_CHANNEL_FIRST)
+			if (IS_NOAA_CHANNEL(gRxVfo->CHANNEL_SAVE))
 			{
-				g_noaa_mode          = true;
-				g_noaa_channel         = g_rx_vfo->channel_save - NOAA_CHANNEL_FIRST;
-				g_noaa_tick_10ms = noaa_tick_2_10ms;
-				g_schedule_noaa        = false;
+				gIsNoaaMode          = true;
+				gNoaaChannel         = gRxVfo->CHANNEL_SAVE - NOAA_CHANNEL_FIRST;
+				gNOAA_Countdown_10ms = NOAA_countdown_2_10ms;
+				gScheduleNOAA        = false;
 			}
 			else
-				g_noaa_mode = false;
+				gIsNoaaMode = false;
 		}
 		else
-			g_noaa_mode = false;
+			gIsNoaaMode = false;
 	}
 #endif
 
-void RADIO_enableTX(const bool fsk_tx)
+void RADIO_SetTxParameters(void)
 {
-	BK4819_filter_bandwidth_t Bandwidth = g_current_vfo->channel.channel_bandwidth;
+	BK4819_FilterBandwidth_t Bandwidth = gCurrentVfo->CHANNEL_BANDWIDTH;
 
-	GPIO_ClearBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
+	AUDIO_AudioPathOff();
 
-	BK4819_set_GPIO_pin(BK4819_GPIO0_PIN28_RX_ENABLE, false);
+	gEnableSpeaker = false;
 
-	Bandwidth = RADIO_set_bandwidth(Bandwidth, g_current_vfo->channel.mod_mode);
+	BK4819_ToggleGpioOut(BK4819_GPIO0_PIN28_RX_ENABLE, false);
 
-	// if DTMF is enabled when TX'ing, it changes the TX audio filtering ! .. 1of11
-	// so MAKE SURE that DTMF is disabled - until needed
-	BK4819_DisableDTMF();
+	switch (Bandwidth)
+	{
+		default:
+			Bandwidth = BK4819_FILTER_BW_WIDE;
+			[[fallthrough]];
+		case BK4819_FILTER_BW_WIDE:
+		case BK4819_FILTER_BW_NARROW:
+			#ifdef ENABLE_AM_FIX
+//				BK4819_SetFilterBandwidth(Bandwidth, gCurrentVfo->Modulation == MODULATION_AM && gSetting_AM_fix);
+				BK4819_SetFilterBandwidth(Bandwidth, true);
+			#else
+				BK4819_SetFilterBandwidth(Bandwidth, false);
+			#endif
+			break;
+	}
 
-	BK4819_SetCompander((!fsk_tx && g_current_vfo->channel.mod_mode == MOD_MODE_FM) ? g_current_vfo->channel.compand : COMPAND_OFF);
+	BK4819_SetFrequency(gCurrentVfo->pTX->Frequency);
 
-	// ******************
-
-	BK4819_set_rf_frequency(g_current_vfo->p_tx->frequency, true);
-	BK4819_set_rf_filter_path(g_current_vfo->p_tx->frequency);
+	// TX compressor
+	BK4819_SetCompander((gRxVfo->Modulation == MODULATION_FM && (gRxVfo->Compander == 1 || gRxVfo->Compander >= 3)) ? gRxVfo->Compander : 0);
 
 	BK4819_PrepareTransmit();
 
-	RADIO_ConfigureTXPower(g_current_vfo);
+	SYSTEM_DelayMs(10);
 
-	BK4819_set_GPIO_pin(BK4819_GPIO1_PIN29_PA_ENABLE, true);                // PA on
+	BK4819_PickRXFilterPathBasedOnFrequency(gCurrentVfo->pTX->Frequency);
 
-	if (g_current_display_screen != DISPLAY_AIRCOPY)
-		BK4819_SetupPowerAmplifier(g_current_vfo->txp_reg_value, g_current_vfo->p_tx->frequency);
-	else
-		BK4819_SetupPowerAmplifier(0, g_current_vfo->p_tx->frequency);      // very low power when in AIRCOPY mode
+	BK4819_ToggleGpioOut(BK4819_GPIO1_PIN29_PA_ENABLE, true);
 
-	BK4819_set_GPIO_pin(BK4819_GPIO5_PIN1_RED, true);                       // turn the RED LED on
+	SYSTEM_DelayMs(5);
 
-	// ******************
+	BK4819_SetupPowerAmplifier(gCurrentVfo->TXP_CalculatedSetting, gCurrentVfo->pTX->Frequency);
 
-	if (fsk_tx)
-	{
-		BK4819_disable_sub_audible();
-	}
-	else
-	{
-		switch (g_current_vfo->p_tx->code_type)
-		{
-			default:
-			case CODE_TYPE_NONE:
-				BK4819_disable_sub_audible();
-				break;
+	SYSTEM_DelayMs(10);
 
-			case CODE_TYPE_CONTINUOUS_TONE:
-				BK4819_gen_tail(4);
-				BK4819_set_CTCSS_freq(CTCSS_TONE_LIST[g_current_vfo->p_tx->code]);
-				break;
-
-			case CODE_TYPE_DIGITAL:
-			case CODE_TYPE_REVERSE_DIGITAL:
-				BK4819_gen_tail(4);
-				BK4819_set_CDCSS_code(DCS_GetGolayCodeWord(g_current_vfo->p_tx->code_type, g_current_vfo->p_tx->code));
-				break;
-		}
-	}
-}
-
-void RADIO_set_vfo_state(vfo_state_t State)
-{
-	if (State == VFO_STATE_NORMAL)
-	{
-		g_vfo_state[0] = VFO_STATE_NORMAL;
-		g_vfo_state[1] = VFO_STATE_NORMAL;
-	}
-	else
-	{
-		if (State == VFO_STATE_VOLTAGE_HIGH)
-		{
-			g_vfo_state[0] = VFO_STATE_VOLTAGE_HIGH;
-			g_vfo_state[1] = VFO_STATE_TX_DISABLE;
-		}
-		else
-		{	// 1of11
-			const unsigned int vfo = (g_eeprom.config.setting.cross_vfo == CROSS_BAND_OFF) ? g_rx_vfo_num : g_eeprom.config.setting.tx_vfo_num;
-			g_vfo_state[vfo] = State;
-		}
-
-		// cause a display update to remove the message
-		g_update_screen_tick_500ms = 8;    // 4 seconds
-	}
-
-	g_update_display = true;
-}
-
-void RADIO_PrepareTX(void)
-{
-	vfo_state_t State = VFO_STATE_NORMAL;  // default to OK for TX
-
-	#ifdef ENABLE_ALARM
-		if (g_alarm_state == ALARM_STATE_TXALARM && g_eeprom.config.setting.alarm_mode != ALARM_MODE_TONE)
-		{	// enable the alarm tone but not the TX
-
-			g_alarm_state = ALARM_STATE_ALARM;
-			GUI_DisplayScreen();
-			BK4819_start_tone(500, 28, g_current_function == FUNCTION_TRANSMIT, false);
-			SYSTEM_DelayMs(60);
-			BK4819_ExitTxMute();
-			g_alarm_tone_counter_10ms = 0;
-			return;
-		}
-	#endif
-
-	if (g_eeprom.config.setting.dual_watch != DUAL_WATCH_OFF)
-	{	// dual-RX is enabled
-#if 0
-		if (g_rx_vfo_is_active)
-		{	// use the TX vfo
-			g_rx_vfo_num       = g_eeprom.config.setting.tx_vfo_num;
-			g_rx_vfo           = &g_vfo_info[g_eeprom.config.setting.tx_vfo_num];
-			g_rx_vfo_is_active = false;
-		}
-		g_current_vfo = g_rx_vfo;
-#else
-		if (!g_rx_vfo_is_active)
-		{	// use the current RX vfo
-			g_rx_vfo_num       = g_eeprom.config.setting.tx_vfo_num;
-			g_rx_vfo           = &g_vfo_info[g_eeprom.config.setting.tx_vfo_num];
-			g_rx_vfo_is_active = true;
-		}
-		g_current_vfo = g_rx_vfo;
-#endif
-
-		g_update_status = true;
-	}
-
- 	g_current_vfo = (g_eeprom.config.setting.cross_vfo == CROSS_BAND_OFF) ? g_rx_vfo : &g_vfo_info[g_eeprom.config.setting.tx_vfo_num];
-
-	#ifndef ENABLE_TX_WHEN_AM
-		if (g_current_vfo->channel.mod_mode != MOD_MODE_FM)
-		{	// not allowed to TX if not in FM mode
-			State = VFO_STATE_TX_DISABLE;
-		}
-		else
-	#endif
-	#if defined(ENABLE_UART)
-		if (!g_eeprom.config.setting.tx_enable || g_serial_config_tick_500ms > 0)
-	#else
-		if (!g_eeprom.config.setting.tx_enable)
-	#endif
-	{	// TX is disabled or config upload/download in progress
-		State = VFO_STATE_TX_DISABLE;
-	}
-	else
-	if (FREQUENCY_tx_freq_check(g_current_vfo->p_tx->frequency) == 0)
-	{	// TX frequency is allowed
-		if (g_current_vfo->channel.busy_channel_lock && g_current_function == FUNCTION_RECEIVE)
-			State = VFO_STATE_BUSY;          // busy RX'ing a station
-		else
-		if (g_battery_display_level == 0)
-			State = VFO_STATE_BAT_LOW;       // charge your battery !
-//		else
-//		if (g_battery_display_level >= 6)
-//			State = VFO_STATE_VOLTAGE_HIGH;  // over voltage (no doubt to protect the PA) .. this is being a pain
-	}
-	else
-		State = VFO_STATE_TX_DISABLE;        // TX frequency not allowed
-
-	if (State != VFO_STATE_NORMAL)
-	{	// TX not allowed
-
-		RADIO_set_vfo_state(State);
-
-		#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
-			g_alarm_state = ALARM_STATE_OFF;
-		#endif
-
-		g_dtmf_reply_state = DTMF_REPLY_NONE;
-
-		AUDIO_PlayBeep(BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL);
-		return;
-	}
-
-	// ******************************
-	// TX is allowed
-
-	#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-		UART_printf("radio prepare tx %u %s\r\n", g_dtmf_reply_state, g_dtmf_string);
-	#endif
-
-	if (g_dtmf_reply_state == DTMF_REPLY_ANI)
-	{
-		if (g_dtmf_call_mode == DTMF_CALL_MODE_DTMF)
-		{
-			g_dtmf_is_tx              = true;
-			g_dtmf_call_state         = DTMF_CALL_STATE_NONE;
-			g_dtmf_tx_stop_tick_500ms = dtmf_txstop_500ms;
-		}
-		else
-		{
-			g_dtmf_call_state = DTMF_CALL_STATE_CALL_OUT;
-			g_dtmf_is_tx      = false;
-		}
-	}
-
-	FUNCTION_Select(FUNCTION_TRANSMIT);
-}
-
-void RADIO_enable_CxCSS_tail(void)
-{
-	switch (g_current_vfo->p_tx->code_type)
+	switch (gCurrentVfo->pTX->CodeType)
 	{
 		default:
-		case CODE_TYPE_NONE:
+		case CODE_TYPE_OFF:
+			BK4819_ExitSubAu();
 			break;
 
 		case CODE_TYPE_CONTINUOUS_TONE:
-			BK4819_enable_CTCSS_tail();
-			SYSTEM_DelayMs(200);
+			BK4819_SetCTCSSFrequency(CTCSS_Options[gCurrentVfo->pTX->Code]);
 			break;
 
 		case CODE_TYPE_DIGITAL:
 		case CODE_TYPE_REVERSE_DIGITAL:
-			BK4819_enable_CDCSS_tail();
-			SYSTEM_DelayMs(200);
+			BK4819_SetCDCSSCodeWord(DCS_GetGolayCodeWord(gCurrentVfo->pTX->CodeType, gCurrentVfo->pTX->Code));
 			break;
 	}
 }
 
+void RADIO_SetModulation(ModulationMode_t modulation)
+{
+	BK4819_AF_Type_t mod;
+	switch(modulation) {
+		default:
+		case MODULATION_FM:
+			mod = BK4819_AF_FM;
+			break;
+		case MODULATION_AM:
+			mod = BK4819_AF_AM;
+			break;
+		case MODULATION_USB:
+			mod = BK4819_AF_BASEBAND2;
+			break;
+
+#ifdef ENABLE_BYP_RAW_DEMODULATORS
+		case MODULATION_BYP:
+			mod = BK4819_AF_UNKNOWN3;
+			break;
+		case MODULATION_RAW:
+			mod = BK4819_AF_BASEBAND1;
+			break;
+#endif
+	}
+
+	BK4819_SetAF(mod);
+
+	BK4819_SetRegValue(afDacGainRegSpec, 0xF);
+	BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
+	BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
+
+	RADIO_SetupAGC(modulation == MODULATION_AM, false);
+}
+
+void RADIO_SetupAGC(bool listeningAM, bool disable)
+{
+	static uint8_t lastSettings;
+	uint8_t newSettings = (listeningAM << 1) | (disable << 1);
+	if(lastSettings == newSettings)
+		return;
+	lastSettings = newSettings;
+
+
+	if(!listeningAM) { // if not actively listening AM we don't need any AM specific regulation
+		BK4819_SetAGC(!disable);
+		BK4819_InitAGC(false);
+	}
+	else {
+#ifdef ENABLE_AM_FIX
+		if(gSetting_AM_fix) { // if AM fix active lock AGC so AM-fix can do it's job
+			BK4819_SetAGC(0);
+			AM_fix_enable(!disable);
+		}
+		else
+#endif
+		{
+			BK4819_SetAGC(!disable);
+			BK4819_InitAGC(true);
+		}
+	}
+}
+
+void RADIO_SetVfoState(VfoState_t State)
+{
+	if (State == VFO_STATE_NORMAL) {
+		VfoState[0] = VFO_STATE_NORMAL;
+		VfoState[1] = VFO_STATE_NORMAL;
+	} else if (State == VFO_STATE_VOLTAGE_HIGH) {
+		VfoState[0] = VFO_STATE_VOLTAGE_HIGH;
+		VfoState[1] = VFO_STATE_TX_DISABLE;
+	} else {
+		// 1of11
+		const unsigned int vfo = (gEeprom.CROSS_BAND_RX_TX == CROSS_BAND_OFF) ? gEeprom.RX_VFO : gEeprom.TX_VFO;
+		VfoState[vfo] = State;
+	}
+
+	gVFOStateResumeCountdown_500ms = (State == VFO_STATE_NORMAL) ? 0 : vfo_state_resume_countdown_500ms;
+	gUpdateDisplay = true;
+}
+
+
+void RADIO_PrepareTX(void)
+{
+	VfoState_t State = VFO_STATE_NORMAL;  // default to OK to TX
+
+	if (gEeprom.DUAL_WATCH != DUAL_WATCH_OFF)
+	{	// dual-RX is enabled
+
+		gDualWatchCountdown_10ms = dual_watch_count_after_tx_10ms;
+		gScheduleDualWatch       = false;
+
+		if (!gRxVfoIsActive)
+		{	// use the current RX vfo
+			gEeprom.RX_VFO = gEeprom.TX_VFO;
+			gRxVfo         = gTxVfo;
+			gRxVfoIsActive = true;
+		}
+
+		// let the user see that DW is not active
+		gDualWatchActive = false;
+		gUpdateStatus    = true;
+	}
+
+	RADIO_SelectCurrentVfo();
+
+	if(TX_freq_check(gCurrentVfo->pTX->Frequency) != 0
+#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
+		&& gAlarmState != ALARM_STATE_SITE_ALARM
+#endif
+	){
+		// TX frequency not allowed
+		State = VFO_STATE_TX_DISABLE;
+	} else if (SerialConfigInProgress()) {
+		// TX is disabled or config upload/download in progress
+		State = VFO_STATE_TX_DISABLE;
+	} else if (gCurrentVfo->BUSY_CHANNEL_LOCK && gCurrentFunction == FUNCTION_RECEIVE) {
+		// busy RX'ing a station
+		State = VFO_STATE_BUSY;
+	} else if (gBatteryDisplayLevel == 0) {
+		// charge your battery !git co
+		State = VFO_STATE_BAT_LOW;
+	} else if (gBatteryDisplayLevel > 6) {
+		// over voltage .. this is being a pain
+		State = VFO_STATE_VOLTAGE_HIGH;
+	}
+#ifndef ENABLE_TX_WHEN_AM
+	else if (gCurrentVfo->Modulation != MODULATION_FM) {
+		// not allowed to TX if in AM mode
+		State = VFO_STATE_TX_DISABLE;
+	}
+#endif
+
+	if (State != VFO_STATE_NORMAL) {
+		// TX not allowed
+		RADIO_SetVfoState(State);
+
+#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
+		gAlarmState = ALARM_STATE_OFF;
+#endif
+
+#ifdef ENABLE_DTMF_CALLING
+		gDTMF_ReplyState = DTMF_REPLY_NONE;
+#endif
+		AUDIO_PlayBeep(BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL);
+		return;
+	}
+
+	// TX is allowed
+
+#ifdef ENABLE_DTMF_CALLING
+	if (gDTMF_ReplyState == DTMF_REPLY_ANI)
+	{
+		gDTMF_IsTx = gDTMF_CallMode == DTMF_CALL_MODE_DTMF;
+
+		if (gDTMF_IsTx) {
+			gDTMF_CallState = DTMF_CALL_STATE_NONE;
+			gDTMF_TxStopCountdown_500ms = DTMF_txstop_countdown_500ms;
+		} else {
+			gDTMF_CallState = DTMF_CALL_STATE_CALL_OUT;
+		}
+	}
+#endif
+
+	FUNCTION_Select(FUNCTION_TRANSMIT);
+
+	gTxTimerCountdown_500ms = 0;            // no timeout
+
+	#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
+	if (gAlarmState == ALARM_STATE_OFF)
+	#endif
+	{
+		if (gEeprom.TX_TIMEOUT_TIMER == 0)
+			gTxTimerCountdown_500ms = 60;   // 30 sec
+		else if (gEeprom.TX_TIMEOUT_TIMER < (ARRAY_SIZE(gSubMenu_TOT) - 1))
+			gTxTimerCountdown_500ms = 120 * gEeprom.TX_TIMEOUT_TIMER;  // minutes
+		else
+			gTxTimerCountdown_500ms = 120 * 15;  // 15 minutes
+	}
+
+	gTxTimeoutReached    = false;
+	gFlagEndTransmission = false;
+	gRTTECountdown       = 0;
+
+#ifdef ENABLE_DTMF_CALLING
+	gDTMF_ReplyState     = DTMF_REPLY_NONE;
+#endif
+}
+
+void RADIO_EnableCxCSS(void)
+{
+	switch (gCurrentVfo->pTX->CodeType) {
+	case CODE_TYPE_DIGITAL:
+	case CODE_TYPE_REVERSE_DIGITAL:
+		BK4819_EnableCDCSS();
+		break;
+	default:
+		BK4819_EnableCTCSS();
+		break;
+	}
+
+	SYSTEM_DelayMs(200);
+}
+
+void RADIO_SendEndOfTransmission(void)
+{
+	BK4819_PlayRoger();
+	DTMF_SendEndOfTransmission();
+
+	// send the CTCSS/DCS tail tone - allows the receivers to mute the usual FM squelch tail/crash
+	RADIO_EnableCxCSS();
+	RADIO_SetupRegisters(false);
+}
+
 void RADIO_PrepareCssTX(void)
 {
-	GPIO_ClearBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-
 	RADIO_PrepareTX();
 
 	SYSTEM_DelayMs(200);
 
-	RADIO_enable_CxCSS_tail();
-
-	RADIO_setup_registers(true);
-}
-
-void RADIO_tx_eot(void)
-{
-	#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
-		if (g_alarm_state != ALARM_STATE_OFF)
-		{	// don't send EOT if TX'ing tone/alarm
-			BK4819_ExitDTMF_TX(true);
-			return;
-		}
-	#endif
-
-	if (g_dtmf_call_state == DTMF_CALL_STATE_NONE &&
-	   (g_current_vfo->channel.dtmf_ptt_id_tx_mode == PTT_ID_EOT || g_current_vfo->channel.dtmf_ptt_id_tx_mode == PTT_ID_BOTH))
-	{	// end-of-tx
-		if (g_eeprom.config.setting.dtmf.side_tone)
-		{
-			GPIO_SetBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-
-			SYSTEM_DelayMs(60);
-		}
-
-		BK4819_EnterDTMF_TX(g_eeprom.config.setting.dtmf.side_tone);
-		BK4819_PlayDTMFString(
-				g_eeprom.config.setting.dtmf.key_down_code,
-				0,
-				g_eeprom.config.setting.dtmf.first_code_persist_time * 10,
-				g_eeprom.config.setting.dtmf.hash_code_persist_time * 10,
-				g_eeprom.config.setting.dtmf.code_persist_time * 10,
-				g_eeprom.config.setting.dtmf.code_interval_time * 10);
-
-		GPIO_ClearBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-	}
-	else
-#ifdef ENABLE_MDC1200
-	if (g_current_vfo->channel.mdc1200_mode == MDC1200_MODE_EOT || g_current_vfo->channel.mdc1200_mode == MDC1200_MODE_BOTH)
-	{
-		BK4819_send_MDC1200(MDC1200_OP_CODE_POST_ID, 0x00, g_eeprom.config.setting.mdc1200_id, false);
-
-		#ifdef ENABLE_MDC1200_SIDE_BEEP
-			BK4819_start_tone(880, 10, true, true);
-			SYSTEM_DelayMs(120);
-			BK4819_stop_tones(true);
-		#endif
-	}
-	else
-#endif
-	if (g_current_vfo->channel.dtmf_ptt_id_tx_mode == PTT_ID_APOLLO)
-	{
-		BK4819_start_tone(APOLLO_TONE2_HZ, 28, true, false);
-		SYSTEM_DelayMs(APOLLO_TONE_MS);
-		BK4819_stop_tones(true);
-	}
-	else
-	if (g_eeprom.config.setting.roger_mode != ROGER_MODE_OFF)
-	{
-		BK4819_PlayRoger(g_eeprom.config.setting.roger_mode);
-	}
-
-	BK4819_ExitDTMF_TX(true);
+	RADIO_EnableCxCSS();
+	RADIO_SetupRegisters(true);
 }

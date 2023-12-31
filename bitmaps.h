@@ -7,54 +7,45 @@
 extern const uint8_t BITMAP_POWERSAVE[8];
 extern const uint8_t BITMAP_TX[8];
 extern const uint8_t BITMAP_RX[8];
+extern const uint8_t BITMAP_FM[10];
+extern const uint8_t BITMAP_BatteryLevel[2];
+extern const uint8_t BITMAP_BatteryLevel1[17];
 
-extern const uint8_t BITMAP_BATTERY_LEVEL[17];
+extern const uint8_t BITMAP_USB_C[9];
 
-extern const uint8_t BITMAP_USB_C[8];
+extern const uint8_t BITMAP_KeyLock[6];
 
-#ifdef ENABLE_KEYLOCK
-	extern const uint8_t BITMAP_KEYLOCK[7];
-#endif
-
-extern const uint8_t BITMAP_F_KEY[6];
+extern const uint8_t BITMAP_F_Key[6];
 
 #ifdef ENABLE_VOX
-	extern const uint8_t BITMAP_VOX[17];
-	extern const uint8_t BITMAP_VOX_SMALL[17];
+	extern const uint8_t BITMAP_VOX[18];
 #endif
 
-#if 0
-	extern const uint8_t BITMAP_WX[12];
-#else
-	extern const uint8_t BITMAP_XB[11];
-#endif
+extern const uint8_t BITMAP_XB[12];
 
-extern const uint8_t BITMAP_TDR_RUNNING[12];
-extern const uint8_t BITMAP_TDR_HOLDING[12];
+extern const uint8_t BITMAP_TDR1[16];
+extern const uint8_t BITMAP_TDR2[10];
 
 #ifdef ENABLE_VOICE
-	extern const uint8_t BITMAP_VOICE_PROMPT[7];
-#endif
-
-extern const uint8_t BITMAP_MONITOR[6];
-
-#ifdef ENABLE_FMRADIO
-	extern const uint8_t BITMAP_FM[11];
+	extern const uint8_t BITMAP_VoicePrompt[9];
 #endif
 
 #ifdef ENABLE_NOAA
-	extern const uint8_t BITMAP_NOAA[10];
+	extern const uint8_t BITMAP_NOAA[11];
 #endif
 
-extern const uint8_t BITMAP_ANTENNA[5];
+extern const uint8_t BITMAP_Antenna[5];
 
-extern const uint8_t BITMAP_MARKER[8];
+extern const uint8_t BITMAP_VFO_Default[8];
+extern const uint8_t BITMAP_VFO_NotDefault[8];
 
-extern const uint8_t BITMAP_VFO_DEFAULT[7];
-extern const uint8_t BITMAP_VFO_NOT_DEFAULT[7];
+extern const uint8_t BITMAP_ScanList1[6];
+extern const uint8_t BITMAP_ScanList2[6];
 
-extern const uint8_t BITMAP_SCANLIST1[6];
-extern const uint8_t BITMAP_SCANLIST2[6];
+extern const uint8_t BITMAP_compand[6];
 
+#ifndef ENABLE_CUSTOM_MENU_LAYOUT
+	extern const uint8_t BITMAP_CurrentIndicator[8];
 #endif
 
+#endif

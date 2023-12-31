@@ -14,21 +14,28 @@
  *     limitations under the License.
  */
 
-#ifndef BACKLIGHT_H
-#define BACKLIGHT_H
+#ifndef DRIVER_BACKLIGHT_H
+#define DRIVER_BACKLIGHT_H
 
 #include <stdint.h>
 #include <stdbool.h>
 
-#define BACKLIGHT_MAX_BRIGHTNESS  100
+extern uint16_t gBacklightCountdown_500ms;
+extern uint8_t gBacklightBrightness;
 
-extern uint16_t g_backlight_tick_10ms;
+#ifdef ENABLE_BLMIN_TMP_OFF
+typedef enum {
+    BLMIN_STAT_ON,
+    BLMIN_STAT_OFF,
+    BLMIN_STAT_UNKNOWN
+} BLMIN_STAT_t;
+#endif
 
-void     BACKLIGHT_init(void);
-uint16_t BACKLIGHT_ticks(void);
-bool     BACKLIGHT_is_on(void);
-void     BACKLIGHT_set_brightness(unsigned int brightness);
-void     BACKLIGHT_turn_on(const unsigned int min_secs);
-void     BACKLIGHT_turn_off(void);
+void BACKLIGHT_InitHardware();
+void BACKLIGHT_TurnOn();
+void BACKLIGHT_TurnOff();
+bool BACKLIGHT_IsOn();
+void BACKLIGHT_SetBrightness(uint8_t brigtness);
+uint8_t BACKLIGHT_GetBrightness(void);
 
 #endif

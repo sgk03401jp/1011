@@ -14,7 +14,8 @@
  *     limitations under the License.
  */
 
-#include "app/dtmf.h"
+#include <string.h>
+
 #ifdef ENABLE_FMRADIO
 	#include "app/fm.h"
 #endif
@@ -24,11 +25,11 @@
 #include "bsp/dp32g030/saradc.h"
 #include "bsp/dp32g030/syscon.h"
 #include "driver/adc.h"
-//#include "driver/backlight.h"
+#include "driver/backlight.h"
 #ifdef ENABLE_FMRADIO
 	#include "driver/bk1080.h"
 #endif
-#include "driver/bk4819.h"
+
 #include "driver/crc.h"
 #include "driver/eeprom.h"
 #include "driver/flash.h"
@@ -42,7 +43,6 @@
 #if defined(ENABLE_OVERLAY)
 	#include "sram-overlay.h"
 #endif
-#include "ui/menu.h"
 
 #if defined(ENABLE_OVERLAY)
 	void BOARD_FLASH_Init(void)
@@ -51,8 +51,8 @@
 		FLASH_ConfigureTrimValues();
 		SYSTEM_ConfigureClocks();
 
-		overlay_FLASH_MainClock       = CPU_CLOCK_HZ;
-		overlay_FLASH_ClockMultiplier = CPU_CLOCK_HZ / 1000000;
+		overlay_FLASH_MainClock       = 48000000;
+		overlay_FLASH_ClockMultiplier = 48;
 
 		FLASH_Init(FLASH_READ_MODE_2_CYCLE);
 	}
@@ -83,8 +83,6 @@ void BOARD_GPIO_Init(void)
 		| GPIO_DIR_6_MASK // INPUT
 		);
 	GPIOB->DIR |= 0
-		// Back light
-		| GPIO_DIR_6_BITS_OUTPUT
 		// ST7565
 		| GPIO_DIR_9_BITS_OUTPUT
 		// ST7565 + SWD IO
@@ -110,7 +108,7 @@ void BOARD_GPIO_Init(void)
 		| GPIO_DIR_5_MASK // INPUT
 		);
 
-	#ifdef ENABLE_FMRADIO
+	#if defined(ENABLE_FMRADIO)
 		GPIO_SetBit(&GPIOB->DATA, GPIOB_PIN_BK1080);
 	#endif
 }
@@ -172,14 +170,10 @@ void BOARD_PORTCON_Init(void)
 	// PORT B pin selection
 
 	PORTCON_PORTB_SEL0 &= ~(0
-		// Back light
-		| PORTCON_PORTB_SEL0_B6_MASK
 		// SPI0 SSN
 		| PORTCON_PORTB_SEL0_B7_MASK
 		);
 	PORTCON_PORTB_SEL0 |= 0
-		// Back light
-		| PORTCON_PORTB_SEL0_B6_BITS_GPIOB6
 		// SPI0 SSN
 		| PORTCON_PORTB_SEL0_B7_BITS_SPI0_SSN
 		;
@@ -491,4 +485,21 @@ void BOARD_ADC_GetBatteryInfo(uint16_t *pVoltage, uint16_t *pCurrent)
 	while (!ADC_CheckEndOfConversion(ADC_CH9)) {}
 	*pVoltage = ADC_GetValue(ADC_CH4);
 	*pCurrent = ADC_GetValue(ADC_CH9);
+}
+
+void BOARD_Init(void)
+{
+	BOARD_PORTCON_Init();
+	BOARD_GPIO_Init();
+	BACKLIGHT_InitHardware();
+	BOARD_ADC_Init();
+	ST7565_Init();
+#ifdef ENABLE_FMRADIO
+		BK1080_Init(0, false);
+#endif
+
+#if defined(ENABLE_UART) || defined(ENABLED_AIRCOPY)
+	CRC_Init();
+#endif
+
 }

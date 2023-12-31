@@ -14,11 +14,14 @@
  *     limitations under the License.
  */
 
+#include <assert.h>
+#include <string.h>
+
+#include "app/chFrScanner.h"
 #include "app/dtmf.h"
 #ifdef ENABLE_FMRADIO
 	#include "app/fm.h"
 #endif
-#include "app/search.h"
 #include "driver/keyboard.h"
 #include "misc.h"
 #ifdef ENABLE_AIRCOPY
@@ -30,75 +33,65 @@
 #include "ui/inputbox.h"
 #include "ui/main.h"
 #include "ui/menu.h"
-#include "ui/search.h"
+#include "ui/scanner.h"
 #include "ui/ui.h"
+#include "../misc.h"
 
-gui_display_type_t g_current_display_screen;
-gui_display_type_t g_request_display_screen = DISPLAY_INVALID;
-uint8_t            g_ask_for_confirmation;
-bool               g_ask_to_save;
-bool               g_ask_to_delete;
+GUI_DisplayType_t gScreenToDisplay;
+GUI_DisplayType_t gRequestDisplayScreen = DISPLAY_INVALID;
+
+uint8_t           gAskForConfirmation;
+bool              gAskToSave;
+bool              gAskToDelete;
+
+
+void (*UI_DisplayFunctions[])(void) = {
+	[DISPLAY_MAIN] = &UI_DisplayMain,
+	[DISPLAY_MENU] = &UI_DisplayMenu,
+	[DISPLAY_SCANNER] = &UI_DisplayScanner,
+
+#ifdef ENABLE_FMRADIO
+	[DISPLAY_FM] = &UI_DisplayFM,
+#endif
+
+#ifdef ENABLE_AIRCOPY
+	[DISPLAY_AIRCOPY] = &UI_DisplayAircopy,
+#endif
+};
+
+static_assert(ARRAY_SIZE(UI_DisplayFunctions) == DISPLAY_N_ELEM);
 
 void GUI_DisplayScreen(void)
 {
-	g_update_display = false;
-
-	switch (g_current_display_screen)
-	{
-		case DISPLAY_MAIN:
-			UI_DisplayMain();
-			break;
-
-		#ifdef ENABLE_FMRADIO
-			case DISPLAY_FM:
-				UI_DisplayFM();
-				break;
-		#endif
-		
-		case DISPLAY_MENU:
-			UI_DisplayMenu();
-			break;
-
-		case DISPLAY_SEARCH:
-			UI_DisplaySearch();
-			break;
-
-		#ifdef ENABLE_AIRCOPY
-			case DISPLAY_AIRCOPY:
-				UI_DisplayAircopy();
-				break;
-		#endif
-
-		default:
-			break;
+	if (gScreenToDisplay != DISPLAY_INVALID) {
+		UI_DisplayFunctions[gScreenToDisplay]();
 	}
 }
 
-void GUI_SelectNextDisplay(gui_display_type_t Display)
+void GUI_SelectNextDisplay(GUI_DisplayType_t Display)
 {
 	if (Display == DISPLAY_INVALID)
 		return;
 
-	if (g_current_display_screen != Display)
+	if (gScreenToDisplay != Display)
 	{
 		DTMF_clear_input_box();
 
-		g_input_box_index      = 0;
-		g_in_sub_menu          = false;
-		g_css_scan_mode        = CSS_SCAN_MODE_OFF;
-		g_scan_state_dir       = SCAN_STATE_DIR_OFF;
+		gInputBoxIndex       = 0;
+		gIsInSubMenu         = false;
+		gCssBackgroundScan         = false;
+		gScanStateDir        = SCAN_OFF;
 		#ifdef ENABLE_FMRADIO
-			g_fm_scan_state_dir = FM_SCAN_STATE_DIR_OFF;
-			g_update_display    = true;
+			gFM_ScanState    = FM_SCAN_OFF;
 		#endif
-		g_ask_for_confirmation = 0;
-		g_ask_to_save          = false;
-		g_ask_to_delete        = false;
-		g_fkey_pressed         = false;
+		gAskForConfirmation  = 0;
+		gAskToSave           = false;
+		gAskToDelete         = false;
+		gWasFKeyPressed      = false;
 
-		g_update_status        = true;
+		gUpdateStatus        = true;
 	}
 
-	g_current_display_screen = Display;
-	g_update_display         = true;
+	gScreenToDisplay = Display;
+	gUpdateDisplay   = true;
 }

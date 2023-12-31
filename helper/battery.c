@@ -14,137 +14,212 @@
  *     limitations under the License.
  */
 
+#include <assert.h>
+
 #include "battery.h"
 #include "driver/backlight.h"
+#include "driver/st7565.h"
+#include "functions.h"
 #include "misc.h"
 #include "settings.h"
 #include "ui/battery.h"
 #include "ui/menu.h"
 #include "ui/ui.h"
 
-uint16_t          g_usb_current_voltage;
-uint16_t          g_usb_current;
-uint16_t          g_battery_voltages[4];
-uint16_t          g_battery_voltage_average;
-uint8_t           g_battery_display_level;
-bool              g_charging_with_type_c;
-bool              g_low_battery;
-bool              g_low_battery_blink;
-uint16_t          g_battery_check_counter;
+uint16_t          gBatteryCalibration[6];
+uint16_t          gBatteryCurrentVoltage;
+uint16_t          gBatteryCurrent;
+uint16_t          gBatteryVoltages[4];
+uint16_t          gBatteryVoltageAverage;
+uint8_t           gBatteryDisplayLevel;
+bool              gChargingWithTypeC;
+bool              gLowBatteryBlink;
+bool              gLowBattery;
+bool              gLowBatteryConfirmed;
+uint16_t          gBatteryCheckCounter;
 
-volatile uint16_t g_power_save_tick_10ms;
+typedef enum {
+	BATTERY_LOW_INACTIVE,
+	BATTERY_LOW_ACTIVE,
+	BATTERY_LOW_CONFIRMED
+} BatteryLow_t;
 
-/*
-Based on real measurement
 
-Volts	Percent		Volts	Percent		Volts	Percent		Volts	Percent
-8.28	100			7.95099	73			7.7184	46			7.48116	19
-8.22	99          7.94188	72          7.71091	45          7.46364	18
-8.17	98          7.9338	71          7.70911	44          7.44789	17
-8.13632	97          7.92684	70          7.70098	43          7.43318	16
-8.12308	96          7.9178	69          7.69619	42          7.41864	15
-8.09688	95          7.90823	68          7.69018	41          7.40579	14
-8.08124	94          7.89858	67          7.68473	40          7.39289	13
-8.06912	93          7.88667	66          7.67911	39          7.37839	12
-8.05826	92          7.87673	65          7.67087	38          7.36017	11
-8.05008	91          7.86864	64          7.66601	37          7.33704	10
-8.04192	90          7.85802	63          7.6599	36          7.3079	9
-8.03866	89          7.84816	62          7.65418	35          7.26793	8
-8.03089	88          7.83744	61          7.64775	34          7.21291	7
-8.0284	87          7.82748	60          7.64065	33          7.13416	6
-8.02044	86          7.81983	59          7.63136	32          7.02785	5
-8.01832	85          7.80929	58          7.6244	31          6.89448	4
-8.01072	84          7.79955	57          7.61636	30          6.72912	3
-8.00965	83          7.79017	56          7.60738	29          6.5164	2
-8.00333	82          7.78107	55          7.597	28          6.19272	1
-7.99973	81          7.77167	54          7.5876	27          5.63138	0
-7.99218	80          7.76509	53          7.57732	26
-7.98999	79          7.75649	52          7.56563	25
-7.98234	78          7.74939	51          7.55356	24
-7.97892	77          7.7411	50          7.54088	23
-7.97043	76          7.73648	49          7.52683	22
-7.96478	75          7.72911	48          7.51285	21
-7.95983	74          7.72097	47          7.49832	20
-*/
+uint16_t          lowBatteryCountdown;
+const uint16_t 	  lowBatteryPeriod = 30;
+
+volatile uint16_t gPowerSave_10ms;
+
+
+const uint16_t Voltage2PercentageTable[][7][2] = {
+	[BATTERY_TYPE_1600_MAH] = {
+		{828, 100},
+		{814, 97 },
+		{760, 25 },
+		{729, 6  },
+		{630, 0  },
+		{0,   0  },
+		{0,   0  },
+	},
+
+	[BATTERY_TYPE_2200_MAH] = {
+		{832, 100},
+		{813, 95 },
+		{740, 60 },
+		{707, 21 },
+		{682, 5  },
+		{630, 0  },
+		{0,   0  },
+	},
+};
+
+static_assert(ARRAY_SIZE(Voltage2PercentageTable[BATTERY_TYPE_1600_MAH]) ==
+	ARRAY_SIZE(Voltage2PercentageTable[BATTERY_TYPE_2200_MAH]));
+
+
 unsigned int BATTERY_VoltsToPercent(const unsigned int voltage_10mV)
 {
-	if (voltage_10mV > 814)
-		return 100;
-	if (voltage_10mV > 756)
-		return ((132ul * voltage_10mV) /  100) - 974u;
-	if (voltage_10mV > 729)
-		return  ((63ul * voltage_10mV) /  100) - 452u;
-	if (voltage_10mV > 600)
-		return  ((52ul * voltage_10mV) / 1000) - 31u;    	
+	const uint16_t (*crv)[2] = Voltage2PercentageTable[gEeprom.BATTERY_TYPE];
+	const int mulipl = 1000;
+	for (unsigned int i = 1; i < ARRAY_SIZE(Voltage2PercentageTable[BATTERY_TYPE_2200_MAH]); i++) {
+		if (voltage_10mV > crv[i][0]) {
+			const int a = (crv[i - 1][1] - crv[i][1]) * mulipl / (crv[i - 1][0] - crv[i][0]);
+			const int b = crv[i][1] - a * crv[i][0] / mulipl;
+			const int p = a * voltage_10mV / mulipl + b;
+			return MIN(p, 100);
+		}
+	}
+
 	return 0;
 }
 
 void BATTERY_GetReadings(const bool bDisplayBatteryLevel)
 {
-	const uint8_t  PreviousBatteryLevel = g_battery_display_level;
-	const uint16_t Voltage              = (g_battery_voltages[0] + g_battery_voltages[1] + g_battery_voltages[2] + g_battery_voltages[3]) / 4;
+	const uint8_t  PreviousBatteryLevel = gBatteryDisplayLevel;
+	const uint16_t Voltage              = (gBatteryVoltages[0] + gBatteryVoltages[1] + gBatteryVoltages[2] + gBatteryVoltages[3]) / 4;
 
-	g_battery_display_level = 0;
+	gBatteryVoltageAverage = (Voltage * 760) / gBatteryCalibration[3];
 
-	if (g_eeprom.calib.battery[5] < Voltage)
-		g_battery_display_level = 6;
-	else
-	if (g_eeprom.calib.battery[4] < Voltage)
-		g_battery_display_level = 5;
-	else
-	if (g_eeprom.calib.battery[3] < Voltage)
-		g_battery_display_level = 4;
-	else
-	if (g_eeprom.calib.battery[2] < Voltage)
-		g_battery_display_level = 3;
-	else
-	if (g_eeprom.calib.battery[1] < Voltage)
-		g_battery_display_level = 2;
-	else
-	if (g_eeprom.calib.battery[0] < Voltage)
-		g_battery_display_level = 1;
+	if(gBatteryVoltageAverage > 890)
+		gBatteryDisplayLevel = 7; // battery overvoltage
+	else if(gBatteryVoltageAverage < 630)
+		gBatteryDisplayLevel = 0; // battery critical
+	else {
+		gBatteryDisplayLevel = 1;
+		const uint8_t levels[] = {5,17,41,65,88};
+		uint8_t perc = BATTERY_VoltsToPercent(gBatteryVoltageAverage);
+		for(uint8_t i = 6; i >= 1; i--){
+			if (perc > levels[i-2]) {
+				gBatteryDisplayLevel = i;
+				break;
+			}
+		}
+	}
 
-	g_battery_voltage_average = (Voltage * 760) / g_eeprom.calib.battery[3];
 
-	if ((g_current_display_screen == DISPLAY_MENU) && g_menu_cursor == MENU_VOLTAGE)
-		g_update_display = true;
+	if ((gScreenToDisplay == DISPLAY_MENU) && UI_MENU_GetCurrentMenuId() == MENU_VOL)
+		gUpdateDisplay = true;
 
-	if (g_usb_current < 501)
+	if (gBatteryCurrent < 501)
 	{
-		if (g_charging_with_type_c)
+		if (gChargingWithTypeC)
 		{
-			g_update_status  = true;
-			g_update_display = true;
+			gUpdateStatus  = true;
+			gUpdateDisplay = true;
 		}
 
-		g_charging_with_type_c = false;
+		gChargingWithTypeC = false;
 	}
 	else
 	{
-		if (!g_charging_with_type_c)
+		if (!gChargingWithTypeC)
 		{
-			g_update_status  = true;
-			g_update_display = true;
-			BACKLIGHT_turn_on(0);
+			gUpdateStatus  = true;
+			gUpdateDisplay = true;
+			BACKLIGHT_TurnOn();
 		}
 
-		g_charging_with_type_c = true;
+		gChargingWithTypeC = true;
 	}
 
-	if (PreviousBatteryLevel != g_battery_display_level)
+	if (PreviousBatteryLevel != gBatteryDisplayLevel)
 	{
-		if (g_battery_display_level < 2)
+		if(gBatteryDisplayLevel > 2)
+			gLowBatteryConfirmed = false;
+		else if (gBatteryDisplayLevel < 2)
 		{
-			g_low_battery = true;
+			gLowBattery = true;
 		}
 		else
 		{
-			g_low_battery = false;
+			gLowBattery = false;
 
 			if (bDisplayBatteryLevel)
-				UI_DisplayBattery(g_battery_display_level, g_low_battery_blink);
+				UI_DisplayBattery(gBatteryDisplayLevel, gLowBatteryBlink);
 		}
 
-		g_low_battery_tick_10ms = 0;
+		if(!gLowBatteryConfirmed)
+			gUpdateDisplay = true;
+
+		lowBatteryCountdown = 0;
+	}
+}
+
+void BATTERY_TimeSlice500ms(void)
+{
+	if (!gLowBattery) {
+		return;
+	}
+
+	gLowBatteryBlink = ++lowBatteryCountdown & 1;
+
+	UI_DisplayBattery(0, gLowBatteryBlink);
+
+	if (gCurrentFunction == FUNCTION_TRANSMIT) {
+		return;
+	}
+
+	// not transmitting
+
+	if (lowBatteryCountdown < lowBatteryPeriod) {
+		if (lowBatteryCountdown == lowBatteryPeriod-1 && !gChargingWithTypeC && !gLowBatteryConfirmed) {
+			AUDIO_PlayBeep(BEEP_500HZ_60MS_DOUBLE_BEEP);
+		}
+		return;
+	}
+
+	lowBatteryCountdown = 0;
+
+	if (gChargingWithTypeC) {
+		return;
+	}
+
+	// not on charge
+	if (!gLowBatteryConfirmed) {
+		AUDIO_PlayBeep(BEEP_500HZ_60MS_DOUBLE_BEEP);
+#ifdef ENABLE_VOICE
+		AUDIO_SetVoiceID(0, VOICE_ID_LOW_VOLTAGE);
+#endif
+	}
+
+	if (gBatteryDisplayLevel != 0) {
+#ifdef ENABLE_VOICE
+		AUDIO_PlaySingleVoice(false);
+#endif
+		return;
+	}
+
+#ifdef ENABLE_VOICE
+	AUDIO_PlaySingleVoice(true);
+#endif
+
+	gReducedService = true;
+
+	FUNCTION_Select(FUNCTION_POWER_SAVE);
+
+	ST7565_HardwareReset();
+
+	if (gEeprom.BACKLIGHT_TIME < (ARRAY_SIZE(gSubMenu_BACKLIGHT) - 1)) {
+		BACKLIGHT_TurnOff();
 	}
 }

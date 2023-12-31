@@ -19,11 +19,8 @@
 
 #include <stdint.h>
 
-void     CRC_Init(void);
-#ifdef ENABLE_MDC1200
-	void CRC_InitReverse(void);
-#endif
-uint16_t CRC_Calculate(const void *buffer, const unsigned int size);
+void CRC_Init(void);
+uint16_t CRC_Calculate(const void *pBuffer, uint16_t Size);
 
 #endif
 

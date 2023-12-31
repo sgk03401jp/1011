@@ -21,11 +21,11 @@
 
 #include "driver/keyboard.h"
 
-extern unsigned int g_input_box_index;
-extern char         g_input_box[8];
+extern char    gInputBox[8];
+extern uint8_t gInputBoxIndex;
 
-uint32_t INPUTBOX_value(void);
-void     INPUTBOX_append(const key_code_t Digit);
+void INPUTBOX_Append(const KEY_Code_t Digit);
+const char* INPUTBOX_GetAscii();
 
 #endif
 

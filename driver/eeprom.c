@@ -14,67 +14,50 @@
  *     limitations under the License.
  */
 
-#include <string.h>     // NULL and memcmp
+#include <stddef.h>
+#include <string.h>
 
 #include "driver/eeprom.h"
 #include "driver/i2c.h"
 #include "driver/system.h"
 
-void EEPROM_ReadBuffer(const uint16_t address, void *p_buffer, const unsigned int size)
+void EEPROM_ReadBuffer(uint16_t Address, void *pBuffer, uint8_t Size)
 {
-	if ((address + size) > 0x2000 || size == 0)
-		return;
-
 	I2C_Start();
+
 	I2C_Write(0xA0);
-	I2C_Write((address >> 8) & 0xFF);
-	I2C_Write((address >> 0) & 0xFF);
+
+	I2C_Write((Address >> 8) & 0xFF);
+	I2C_Write((Address >> 0) & 0xFF);
 
 	I2C_Start();
+
 	I2C_Write(0xA1);
-//	I2C_ReadBuffer(p_buffer, size, false);
-	I2C_ReadBuffer(p_buffer, size, true);   // faster read
+
+	I2C_ReadBuffer(pBuffer, Size);
+
 	I2C_Stop();
 }
 
-void EEPROM_WriteBuffer8(const uint16_t address, const void *p_buffer)
+void EEPROM_WriteBuffer(uint16_t Address, const void *pBuffer)
 {
-	if (p_buffer == NULL || (address + 8) > 0x2000)
+	if (pBuffer == NULL || Address >= 0x2000)
 		return;
 
-#if 0
-	// normal way
+
+	uint8_t buffer[8];
+	EEPROM_ReadBuffer(Address, buffer, 8);
+	if (memcmp(pBuffer, buffer, 8) == 0) {
+		return;
+	}
 
 	I2C_Start();
 	I2C_Write(0xA0);
-	I2C_Write((address >> 8) & 0xFF);
-	I2C_Write((address >> 0) & 0xFF);
-	I2C_WriteBuffer(p_buffer, 8);
+	I2C_Write((Address >> 8) & 0xFF);
+	I2C_Write((Address >> 0) & 0xFF);
+	I2C_WriteBuffer(pBuffer, 8);
 	I2C_Stop();
 
-	// give the EEPROM time to burn the data in (apparently takes 1.5ms ~ 5ms)
-	SYSTEM_DelayMs(6);
-
-#else
-	// eeprom wear reduction
-	// only write the data if it's different to what's already there
-
-	uint8_t buffer[8];
-
-	EEPROM_ReadBuffer(address, buffer, 8);
-
-	if (memcmp(p_buffer, buffer, 8) != 0)
-	{
-		I2C_Start();
-		I2C_Write(0xA0);
-		I2C_Write((address >> 8) & 0xFF);
-		I2C_Write((address >> 0) & 0xFF);
-		I2C_WriteBuffer(p_buffer, 8);
-		I2C_Stop();
-
-		// give the EEPROM time to burn the data in (apparently takes 1.5ms ~ 5ms)
-		SYSTEM_DelayMs(6);
-	}
-
-#endif
+	// give the EEPROM time to burn the data in (apparently takes 5ms)
+	SYSTEM_DelayMs(8);
 }

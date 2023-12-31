@@ -14,6 +14,8 @@
  *     limitations under the License.
  */
 
+#include <string.h>
+
 #ifdef ENABLE_AIRCOPY
 	#include "app/aircopy.h"
 #endif
@@ -29,10 +31,10 @@
 #include "ui/menu.h"
 #include "ui/ui.h"
 
-boot_mode_t BOOT_GetMode(void)
+BOOT_Mode_t BOOT_GetMode(void)
 {
 	unsigned int i;
-	key_code_t   Keys[2];
+	KEY_Code_t   Keys[2];
 
 	for (i = 0; i < 2; i++)
 	{
@@ -44,8 +46,13 @@ boot_mode_t BOOT_GetMode(void)
 
 	if (Keys[0] == Keys[1])
 	{
+		gKeyReading0 = Keys[0];
+		gKeyReading1 = Keys[0];
+
+		gDebounceCounter = 2;
+
 		if (Keys[0] == KEY_SIDE1)
-			return BOOT_MODE_UNHIDE_HIDDEN;
+			return BOOT_MODE_F_LOCK;
 
 		#ifdef ENABLE_AIRCOPY
 			if (Keys[0] == KEY_SIDE2)
@@ -56,9 +63,9 @@ boot_mode_t BOOT_GetMode(void)
 	return BOOT_MODE_NORMAL;
 }
 
-void BOOT_ProcessMode(boot_mode_t Mode)
+void BOOT_ProcessMode(BOOT_Mode_t Mode)
 {
-	if (Mode == BOOT_MODE_UNHIDE_HIDDEN)
+	if (Mode == BOOT_MODE_F_LOCK)
 	{
 		GUI_SelectNextDisplay(DISPLAY_MENU);
 	}
@@ -66,29 +73,35 @@ void BOOT_ProcessMode(boot_mode_t Mode)
 		else
 		if (Mode == BOOT_MODE_AIRCOPY)
 		{
-			g_eeprom.config.setting.dual_watch         = DUAL_WATCH_OFF;
-			g_eeprom.config.setting.battery_save_ratio = 0;
+			gEeprom.DUAL_WATCH               = DUAL_WATCH_OFF;
+			gEeprom.BATTERY_SAVE             = 0;
 			#ifdef ENABLE_VOX
-				g_eeprom.config.setting.vox_enabled    = false;
+				gEeprom.VOX_SWITCH           = false;
 			#endif
-			g_eeprom.config.setting.cross_vfo     = CROSS_BAND_OFF;
-			g_eeprom.config.setting.auto_key_lock = 0;
-			g_eeprom.config.setting.key1_short    = ACTION_OPT_NONE;
-			g_eeprom.config.setting.key1_long     = ACTION_OPT_NONE;
-			g_eeprom.config.setting.key2_short    = ACTION_OPT_NONE;
-			g_eeprom.config.setting.key2_long     = ACTION_OPT_NONE;
+			gEeprom.CROSS_BAND_RX_TX         = CROSS_BAND_OFF;
+			gEeprom.AUTO_KEYPAD_LOCK         = false;
+			gEeprom.KEY_1_SHORT_PRESS_ACTION = ACTION_OPT_NONE;
+			gEeprom.KEY_1_LONG_PRESS_ACTION  = ACTION_OPT_NONE;
+			gEeprom.KEY_2_SHORT_PRESS_ACTION = ACTION_OPT_NONE;
+			gEeprom.KEY_2_LONG_PRESS_ACTION  = ACTION_OPT_NONE;
+			gEeprom.KEY_M_LONG_PRESS_ACTION  = ACTION_OPT_NONE;
 
-			RADIO_InitInfo(g_rx_vfo, FREQ_CHANNEL_LAST - 1, g_aircopy_freq);
+			RADIO_InitInfo(gRxVfo, FREQ_CHANNEL_LAST - 1, 41002500);
 
-			g_rx_vfo->channel.channel_bandwidth = BANDWIDTH_WIDE;
-			g_rx_vfo->channel.tx_power          = OUTPUT_POWER_LOW;
+			gRxVfo->CHANNEL_BANDWIDTH        = BANDWIDTH_WIDE;
+			gRxVfo->OUTPUT_POWER             = OUTPUT_POWER_LOW;
 
-			RADIO_ConfigureSquelch(g_rx_vfo);
-			RADIO_ConfigureTXPower(g_rx_vfo);
+			RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
 
-			g_current_vfo = g_rx_vfo;
+			gCurrentVfo = gRxVfo;
 
-			AIRCOPY_init();
+			RADIO_SetupRegisters(true);
+			BK4819_SetupAircopy();
+			BK4819_ResetFSK();
+
+			gAircopyState = AIRCOPY_READY;
+
+			GUI_SelectNextDisplay(DISPLAY_AIRCOPY);
 		}
 	#endif
 	else

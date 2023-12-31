@@ -20,18 +20,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-extern uint16_t          g_usb_current_voltage;
-extern uint16_t          g_usb_current;
-extern uint16_t          g_battery_voltages[4];
-extern uint16_t          g_battery_voltage_average;
-extern uint8_t           g_battery_display_level;
-extern bool              g_charging_with_type_c;
-extern bool              g_low_battery;
-extern bool              g_low_battery_blink;
-extern uint16_t          g_battery_check_counter;
-extern volatile uint16_t g_power_save_tick_10ms;
+extern uint16_t          gBatteryCalibration[6];
+extern uint16_t          gBatteryCurrentVoltage;
+extern uint16_t          gBatteryCurrent;
+extern uint16_t          gBatteryVoltages[4];
+extern uint16_t          gBatteryVoltageAverage;
+extern uint8_t           gBatteryDisplayLevel;
+extern bool              gChargingWithTypeC;
+extern bool              gLowBatteryBlink;
+extern bool              gLowBattery;
+extern bool              gLowBatteryConfirmed;
+extern uint16_t          gBatteryCheckCounter;
 
-unsigned int BATTERY_VoltsToPercent(const unsigned int voltage_10mV);
-void         BATTERY_GetReadings(const bool bDisplayBatteryLevel);
+extern volatile uint16_t gPowerSave_10ms;
+
+typedef enum {
+    BATTERY_TYPE_1600_MAH,
+    BATTERY_TYPE_2200_MAH,
+    BATTERY_TYPE_UNKNOWN
+} BATTERY_Type_t;
+
+
+unsigned int BATTERY_VoltsToPercent(unsigned int voltage_10mV);
+void BATTERY_GetReadings(bool bDisplayBatteryLevel);
+void BATTERY_TimeSlice500ms(void);
 
 #endif

@@ -19,94 +19,75 @@
 
 #include <stdint.h>
 
-#include "frequencies.h"
-#include "misc.h"
-
-enum frequency_band_e {
-	BAND_NONE   = -1,
-	BAND1_50MHz =  0,
-	BAND2_108MHz,
-	BAND3_137MHz,
-	BAND4_174MHz,
-	BAND5_350MHz,
-	BAND6_400MHz,
-	BAND7_470MHz
-};
-typedef enum frequency_band_e frequency_band_t;
+#define _1GHz_in_KHz 100000000
 
 typedef struct {
 	const uint32_t lower;
 	const uint32_t upper;
 } freq_band_table_t;
 
-typedef struct {
-	const uint32_t lower;
-	const uint32_t upper;
-	const uint16_t step_size;
-} __attribute__((packed)) freq_scan_range_table_t;
+extern const freq_band_table_t BX4819_band1;
+extern const freq_band_table_t BX4819_band2;
 
-extern uint32_t g_aircopy_freq;
+typedef enum  {
+	BAND_NONE = -1,
+	BAND1_50MHz = 0,
+	BAND2_108MHz,
+	BAND3_137MHz,
+	BAND4_174MHz,
+	BAND5_350MHz,
+	BAND6_400MHz,
+	BAND7_470MHz,
+	BAND_N_ELEM
+} FREQUENCY_Band_t;
 
-extern const freq_band_table_t AIR_BAND;
+extern const freq_band_table_t frequencyBandTable[];
 
-extern const freq_band_table_t BX4819_BAND1;
-extern const freq_band_table_t BX4819_BAND2;
-
-extern const freq_band_table_t FREQ_BAND_TABLE[7];
-
-// 250, 500, 625, 1000, 1250, 2500, 833, 1, 5, 10, 25, 50, 100, 125, 1500, 3000, 5000, 10000, 12500, 25000, 50000
-enum step_setting_e {
-	STEP_2_5kHz = 0,
-	STEP_5_0kHz,
+typedef enum {
+// standard steps
+	STEP_2_5kHz,
+	STEP_5kHz,
 	STEP_6_25kHz,
-	STEP_10_0kHz,
+	STEP_10kHz,
 	STEP_12_5kHz,
-	STEP_25_0kHz,
+	STEP_25kHz,
 	STEP_8_33kHz,
-
-	STEP_10Hz,
-	STEP_50Hz,
-	STEP_100Hz,
-	STEP_250Hz,
-	STEP_500Hz,
+// custom steps
+	STEP_0_01kHz,
+	STEP_0_05kHz,
+	STEP_0_1kHz,
+	STEP_0_25kHz,
+	STEP_0_5kHz,
 	STEP_1kHz,
 	STEP_1_25kHz,
+	STEP_9kHz,
 	STEP_15kHz,
+	STEP_20kHz,
 	STEP_30kHz,
 	STEP_50kHz,
 	STEP_100kHz,
 	STEP_125kHz,
+	STEP_200kHz,
 	STEP_250kHz,
-	STEP_500kHz
-};
-typedef enum step_setting_e step_setting_t;
+	STEP_500kHz,
+	STEP_N_ELEM
+} STEP_Setting_t;
 
-extern const uint16_t STEP_FREQ_TABLE[16];
-extern uint16_t       step_freq_table_sorted[ARRAY_SIZE(STEP_FREQ_TABLE)];
+
+extern const uint16_t gStepFrequencyTable[];
 
 #ifdef ENABLE_NOAA
-	extern const uint32_t NOAA_FREQUENCY_TABLE[10];
+	extern const uint32_t NoaaFrequencyTable[10];
 #endif
 
-// ***********
+FREQUENCY_Band_t FREQUENCY_GetBand(uint32_t Frequency);
+uint8_t          FREQUENCY_CalculateOutputPower(uint8_t TxpLow, uint8_t TxpMid, uint8_t TxpHigh, int32_t LowerLimit, int32_t Middle, int32_t UpperLimit, int32_t Frequency);
+uint32_t 		 FREQUENCY_RoundToStep(uint32_t freq, uint16_t step);
 
-unsigned int     FREQUENCY_get_step_index(const unsigned int step_size);
-void             FREQUENCY_init(void);
+STEP_Setting_t   FREQUENCY_GetStepIdxFromSortedIdx(uint8_t sortedIdx);
+uint32_t		 FREQUENCY_GetSortedIdxFromStepIdx(uint8_t step);
 
-frequency_band_t FREQUENCY_GetBand(uint32_t Frequency);
-
-unsigned int     FREQUENCY_band_segment(const uint32_t freq);
-uint8_t          FREQUENCY_CalculateOutputPower(const int16_t low_tx_pwr, const int32_t mid_tx_pwr, const int16_t high_tx_pwr, const uint32_t freq);
-
-uint32_t         FREQUENCY_floor_to_step(uint32_t freq, const uint32_t step_size, const uint32_t lower, const uint32_t upper);
-
-int              FREQUENCY_tx_freq_check(const uint32_t Frequency);
-int              FREQUENCY_rx_freq_check(const uint32_t Frequency);
-
-#ifdef ENABLE_SCAN_RANGES
-	void FREQUENCY_scan_range(const uint32_t freq, uint32_t *lower, uint32_t *upper, uint32_t *step_size);
-#endif
-
-// ***********
+int32_t          TX_freq_check(uint32_t Frequency);
+int32_t          RX_freq_check(uint32_t Frequency);
 
 #endif

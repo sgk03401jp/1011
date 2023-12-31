@@ -54,14 +54,25 @@ enum GPIOC_PINS {
 	GPIOC_PIN_BK4819_SDA = 2,
 
 	GPIOC_PIN_FLASHLIGHT = 3,
-	GPIOC_PIN_SPEAKER    = 4,
+	GPIOC_PIN_AUDIO_PATH = 4,
 	GPIOC_PIN_PTT        = 5
 };
 
-uint8_t GPIO_CheckBit(volatile uint32_t *pReg, uint8_t Bit);
-void    GPIO_ClearBit(volatile uint32_t *pReg, uint8_t Bit);
-void    GPIO_SetBit(  volatile uint32_t *pReg, uint8_t Bit);
-void    GPIO_FlipBit( volatile uint32_t *pReg, uint8_t Bit);
+static inline void GPIO_ClearBit(volatile uint32_t *pReg, uint8_t Bit) {
+	*pReg &= ~(1U << Bit);
+}
+
+static inline uint8_t GPIO_CheckBit(volatile uint32_t *pReg, uint8_t Bit) {
+	return (*pReg >> Bit) & 1U;
+}
+
+static inline void GPIO_FlipBit(volatile uint32_t *pReg, uint8_t Bit) {
+	*pReg ^= 1U << Bit;
+}
+
+static inline void GPIO_SetBit(volatile uint32_t *pReg, uint8_t Bit) {
+	*pReg |= 1U << Bit;
+}
 
 #endif
 

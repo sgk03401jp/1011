@@ -14,296 +14,261 @@
  *     limitations under the License.
  */
 
+#include <string.h>
+
 #include "app/dtmf.h"
-#ifdef ENABLE_FMRADIO
+#if defined(ENABLE_FMRADIO)
 	#include "app/fm.h"
 #endif
+#include "audio.h"
 #include "bsp/dp32g030/gpio.h"
 #include "dcs.h"
 #include "driver/backlight.h"
-#ifdef ENABLE_FMRADIO
+#if defined(ENABLE_FMRADIO)
 	#include "driver/bk1080.h"
 #endif
 #include "driver/bk4819.h"
 #include "driver/gpio.h"
 #include "driver/system.h"
-#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-	#include "driver/uart.h"
-#endif
+#include "driver/st7565.h"
 #include "frequencies.h"
 #include "functions.h"
 #include "helper/battery.h"
-#ifdef ENABLE_MDC1200
-	#include "mdc1200.h"
-#endif
 #include "misc.h"
 #include "radio.h"
 #include "settings.h"
-#include "ui/menu.h"
 #include "ui/status.h"
 #include "ui/ui.h"
 
-function_type_t g_current_function;
+FUNCTION_Type_t gCurrentFunction;
+
+bool FUNCTION_IsRx()
+{
+	return gCurrentFunction == FUNCTION_MONITOR ||
+		   gCurrentFunction == FUNCTION_INCOMING ||
+		   gCurrentFunction == FUNCTION_RECEIVE;
+}
 
 void FUNCTION_Init(void)
 {
-	if (IS_NOT_NOAA_CHANNEL(g_rx_vfo->channel_save))
-	{
-		g_current_code_type = g_selected_code_type;
-		if (g_css_scan_mode == CSS_SCAN_MODE_OFF)
-			g_current_code_type = (g_rx_vfo->channel.mod_mode > 0) ? CODE_TYPE_NONE : g_rx_vfo->p_rx->code_type;
-	}
-	else
-		g_current_code_type = CODE_TYPE_CONTINUOUS_TONE;
+	g_CxCSS_TAIL_Found = false;
+	g_CDCSS_Lost       = false;
+	g_CTCSS_Lost       = false;
 
+	g_SquelchLost      = false;
+
+	gFlagTailNoteEliminationComplete   = false;
+	gTailNoteEliminationCountdown_10ms = 0;
+	gFoundCTCSS                        = false;
+	gFoundCDCSS                        = false;
+	gFoundCTCSSCountdown_10ms          = 0;
+	gFoundCDCSSCountdown_10ms          = 0;
+	gEndOfRxDetectedMaybe              = false;
+
+	gCurrentCodeType = (gRxVfo->Modulation != MODULATION_FM) ? CODE_TYPE_OFF : gRxVfo->pRX->CodeType;
+
+#ifdef ENABLE_VOX
+	g_VOX_Lost     = false;
+#endif
+
+#ifdef ENABLE_DTMF_CALLING
 	DTMF_clear_RX();
+#endif
 
-	g_cxcss_tail_found = false;
-	g_cdcss_lost       = false;
-	g_ctcss_lost       = false;
+#ifdef ENABLE_NOAA
+	gNOAACountdown_10ms = 0;
 
-	#ifdef ENABLE_VOX
-		g_vox_lost = false;
-	#endif
+	if (IS_NOAA_CHANNEL(gRxVfo->CHANNEL_SAVE)) {
+		gCurrentCodeType = CODE_TYPE_CONTINUOUS_TONE;
+	}
+#endif
 
-	g_squelch_open = false;
-
-	g_flag_tail_tone_elimination_complete = false;
-	g_tail_tone_elimination_tick_10ms     = 0;
-	g_found_ctcss                         = false;
-	g_found_cdcss                         = false;
-	g_found_ctcss_tick_10ms               = 0;
-	g_found_cdcss_tick_10ms               = 0;
-	g_end_of_rx_detected_maybe            = false;
-
-	#ifdef ENABLE_NOAA
-		g_noaa_tick_10ms = 0;
-	#endif
-
-	g_update_status = true;
+	gUpdateStatus = true;
 }
 
-void FUNCTION_Select(function_type_t Function)
+void FUNCTION_Foreground(const FUNCTION_Type_t PreviousFunction)
 {
-	const function_type_t prev_func = g_current_function;
-	const bool was_power_save = (prev_func == FUNCTION_POWER_SAVE);
+#ifdef ENABLE_DTMF_CALLING
+	if (gDTMF_ReplyState != DTMF_REPLY_NONE)
+		RADIO_PrepareCssTX();
+#endif
 
-	g_current_function = Function;
-
-	if (was_power_save && Function != FUNCTION_POWER_SAVE)
-	{	// wake up
-		BK4819_Conditional_RX_TurnOn();
-		g_rx_idle_mode = false;
-		UI_DisplayStatus(false);
+	if (PreviousFunction == FUNCTION_TRANSMIT) {
+		ST7565_FixInterfGlitch();
+		gVFO_RSSI_bar_level[0] = 0;
+		gVFO_RSSI_bar_level[1] = 0;
+	} else if (PreviousFunction != FUNCTION_RECEIVE) {
+		return;
 	}
 
-	g_update_status = true;
+#if defined(ENABLE_FMRADIO)
+	if (gFmRadioMode)
+		gFM_RestoreCountdown_10ms = fm_restore_countdown_10ms;
+#endif
+
+#ifdef ENABLE_DTMF_CALLING
+	if (gDTMF_CallState == DTMF_CALL_STATE_CALL_OUT ||
+		gDTMF_CallState == DTMF_CALL_STATE_RECEIVED ||
+		gDTMF_CallState == DTMF_CALL_STATE_RECEIVED_STAY)
+	{
+		gDTMF_auto_reset_time_500ms = gEeprom.DTMF_auto_reset_time * 2;
+	}
+#endif
+	gUpdateStatus = true;
+}
+
+void FUNCTION_PowerSave() {
+	gPowerSave_10ms = gEeprom.BATTERY_SAVE * 10;
+	gPowerSaveCountdownExpired = false;
+
+	gRxIdleMode = true;
+
+	gMonitor = false;
+
+	BK4819_DisableVox();
+	BK4819_Sleep();
+
+	BK4819_ToggleGpioOut(BK4819_GPIO0_PIN28_RX_ENABLE, false);
+
+	gUpdateStatus = true;
+
+	if (gScreenToDisplay != DISPLAY_MENU)     // 1of11 .. don't close the menu
+		GUI_SelectNextDisplay(DISPLAY_MAIN);
+}
+
+void FUNCTION_Transmit()
+{
+	// if DTMF is enabled when TX'ing, it changes the TX audio filtering !! .. 1of11
+	BK4819_DisableDTMF();
+
+#ifdef ENABLE_DTMF_CALLING
+	// clear the DTMF RX buffer
+	DTMF_clear_RX();
+#endif
+
+	// clear the DTMF RX live decoder buffer
+	gDTMF_RX_live_timeout = 0;
+	memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
+
+#if defined(ENABLE_FMRADIO)
+	if (gFmRadioMode)
+		BK1080_Init(0, false);
+#endif
+
+#ifdef ENABLE_ALARM
+	if (gAlarmState == ALARM_STATE_SITE_ALARM)
+	{
+		GUI_DisplayScreen();
+
+		AUDIO_AudioPathOff();
+
+		SYSTEM_DelayMs(20);
+		BK4819_PlayTone(500, 0);
+		SYSTEM_DelayMs(2);
+
+		AUDIO_AudioPathOn();
+
+		gEnableSpeaker = true;
+
+		SYSTEM_DelayMs(60);
+		BK4819_ExitTxMute();
+
+		gAlarmToneCounter = 0;
+		return;
+	}
+#endif
+
+	gUpdateStatus = true;
+
+	GUI_DisplayScreen();
+
+	RADIO_SetTxParameters();
+
+	// turn the RED LED on
+	BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
+
+	DTMF_Reply();
+
+	if (gCurrentVfo->DTMF_PTT_ID_TX_MODE == PTT_ID_APOLLO)
+		BK4819_PlaySingleTone(2525, 250, 0, gEeprom.DTMF_SIDE_TONE);
+
+#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
+	if (gAlarmState != ALARM_STATE_OFF) {
+		#ifdef ENABLE_TX1750
+		if (gAlarmState == ALARM_STATE_TX1750)
+			BK4819_TransmitTone(true, 1750);
+		#endif
+
+		#ifdef ENABLE_ALARM
+		if (gAlarmState == ALARM_STATE_TXALARM)
+			BK4819_TransmitTone(true, 500);
+
+		gAlarmToneCounter = 0;
+		#endif
+
+		SYSTEM_DelayMs(2);
+		AUDIO_AudioPathOn();
+		gEnableSpeaker = true;
+
+		return;
+	}
+#endif
+
+	if (gCurrentVfo->SCRAMBLING_TYPE > 0 && gSetting_ScrambleEnable)
+		BK4819_EnableScramble(gCurrentVfo->SCRAMBLING_TYPE - 1);
+	else
+		BK4819_DisableScramble();
+
+	if (gSetting_backlight_on_tx_rx & BACKLIGHT_ON_TR_TX) {
+		BACKLIGHT_TurnOn();
+	}
+}
+
+
+
+void FUNCTION_Select(FUNCTION_Type_t Function)
+{
+	const FUNCTION_Type_t PreviousFunction = gCurrentFunction;
+	const bool bWasPowerSave = PreviousFunction == FUNCTION_POWER_SAVE;
+
+	gCurrentFunction = Function;
+
+	if (bWasPowerSave && Function != FUNCTION_POWER_SAVE)
+	{
+		BK4819_Conditional_RX_TurnOn_and_GPIO6_Enable();
+		gRxIdleMode = false;
+		UI_DisplayStatus();
+	}
 
 	switch (Function)
 	{
 		case FUNCTION_FOREGROUND:
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-				UART_SendText("func forground\r\n");
-			#endif
-
-			if (g_dtmf_reply_state != DTMF_REPLY_NONE)
-				RADIO_PrepareCssTX();
-
-			if (prev_func == FUNCTION_TRANSMIT)
-			{
-				g_vfo_rssi_bar_level[0] = 0;
-				g_vfo_rssi_bar_level[1] = 0;
-			}
-			else
-			if (prev_func != FUNCTION_RECEIVE)
-				break;
-
-			#ifdef ENABLE_FMRADIO
-				if (g_fm_radio_mode)
-					g_fm_restore_tick_10ms = g_eeprom.config.setting.scan_hold_time * 50;
-			#endif
-
-			if (g_dtmf_call_state == DTMF_CALL_STATE_CALL_OUT ||
-			    g_dtmf_call_state == DTMF_CALL_STATE_RECEIVED ||
-				g_dtmf_call_state == DTMF_CALL_STATE_RECEIVED_STAY)
-			{
-				g_dtmf_auto_reset_time_500ms = g_eeprom.config.setting.dtmf.auto_reset_time * 2;
-			}
-
+			FUNCTION_Foreground(PreviousFunction);
 			return;
 
-		case FUNCTION_NEW_RECEIVE:
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-				UART_printf("func new receive %u\r\n", g_rx_vfo->freq_config_rx.frequency);
-			#endif
-			break;
-			
-		case FUNCTION_RECEIVE:
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-				UART_printf("func receive %u\r\n", g_rx_vfo->freq_config_rx.frequency);
-			#endif
-			break;
-
 		case FUNCTION_POWER_SAVE:
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-				UART_SendText("func power save\r\n");
-			#endif
-
-			if (g_flash_light_state != FLASHLIGHT_SOS)
-			{
-				g_monitor_enabled = false;
-				GPIO_ClearBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-			}
-			
-			g_power_save_tick_10ms = g_eeprom.config.setting.battery_save_ratio * 10;
-			g_power_save_expired   = false;
-
-			g_rx_idle_mode = true;
-
-			BK4819_DisableVox();			
-			BK4819_Sleep();
-
-			BK4819_set_GPIO_pin(BK4819_GPIO0_PIN28_RX_ENABLE, false);
-
-			if (g_current_display_screen != DISPLAY_MENU)
-				GUI_SelectNextDisplay(DISPLAY_MAIN);
-
+			FUNCTION_PowerSave();
 			return;
 
 		case FUNCTION_TRANSMIT:
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-				UART_printf("func transmit %u\r\n", g_tx_vfo->freq_config_tx.frequency);
-			#endif
+			FUNCTION_Transmit();
+			break;
 
-			g_tx_timer_tick_500ms = 0;
-			g_tx_timeout_reached  = false;
-			g_flag_end_tx         = false;
-		
-			g_rtte_count_down = 0;
-		
-			#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
-				if (g_alarm_state == ALARM_STATE_OFF)
-			#endif
-			{
-				if (g_eeprom.config.setting.tx_timeout == 0)
-					g_tx_timer_tick_500ms = 60;   // 30 sec
-				else
-				if (g_eeprom.config.setting.tx_timeout < (ARRAY_SIZE(g_sub_menu_tx_timeout) - 1))
-					g_tx_timer_tick_500ms = 120 * g_eeprom.config.setting.tx_timeout;  // minutes
-				else
-					g_tx_timer_tick_500ms = 120 * 15;  // 15 minutes
-			}
+		case FUNCTION_MONITOR:
+			gMonitor = true;
+			break;
 
-			if (g_eeprom.config.setting.backlight_on_tx_rx == 1 || g_eeprom.config.setting.backlight_on_tx_rx == 3)
-				BACKLIGHT_turn_on(backlight_tx_rx_time_secs);
-
-			if (g_eeprom.config.setting.dual_watch != DUAL_WATCH_OFF)
-			{	// dual-RX is enabled
-				g_dual_watch_tick_10ms = dual_watch_delay_after_tx_10ms;
-				if (g_dual_watch_tick_10ms < (g_eeprom.config.setting.scan_hold_time * 50))
-					g_dual_watch_tick_10ms = g_eeprom.config.setting.scan_hold_time * 50;
-			}
-
-			#ifdef ENABLE_MDC1200
-				BK4819_enable_mdc1200_rx(false);
-			#endif
-
-			// if DTMF is enabled when TX'ing, it changes the TX audio filtering ! .. 1of11
-			// so MAKE SURE that DTMF is disabled - until needed
-			BK4819_DisableDTMF();
-
-			// clear the DTMF RX buffer
-			DTMF_clear_RX();
-
-			#ifdef ENABLE_DTMF_LIVE_DECODER
-				// clear the DTMF RX live decoder buffer
-				g_dtmf_rx_live_timeout = 0;
-				memset(g_dtmf_rx_live, 0, sizeof(g_dtmf_rx_live));
-			#endif
-
-			#ifdef ENABLE_FMRADIO
-				// disable the FM radio
-				if (g_fm_radio_mode)
-					BK1080_Init(0, false);
-			#endif
-
-			g_update_status = true;
-
-			GUI_DisplayScreen();
-
-			BK4819_set_scrambler(0);
-
-			RADIO_enableTX(false);
-
-			#if defined(ENABLE_UART) && defined(ENABLE_UART_DEBUG)
-//				UART_printf("function tx %u %s\r\n", g_dtmf_reply_state, g_dtmf_string);
-			#endif
-
-			#if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
-				if (g_alarm_state != ALARM_STATE_OFF)
-				{
-					#ifdef ENABLE_TX1750
-						if (g_alarm_state == ALARM_STATE_TX1750)
-							BK4819_TransmitTone(true, 1750);
-					#endif
-					#ifdef ENABLE_ALARM
-						if (g_alarm_state == ALARM_STATE_TXALARM)
-							BK4819_TransmitTone(true, 500);
-					#endif
-
-					SYSTEM_DelayMs(2);
-
-					GPIO_SetBit(&GPIOC->DATA, GPIOC_PIN_SPEAKER);
-
-					#ifdef ENABLE_ALARM
-						g_alarm_tone_counter_10ms = 0;
-					#endif
-					break;
-				}
-				else
-			#endif
-			if (!DTMF_Reply())
-			{
-			#ifdef ENABLE_MDC1200
-				if (g_current_vfo->channel.mdc1200_mode == MDC1200_MODE_BOT || g_current_vfo->channel.mdc1200_mode == MDC1200_MODE_BOTH)
-				{
-					#ifdef ENABLE_MDC1200_SIDE_BEEP
-//						BK4819_start_tone(880, 10, true, true);
-//						SYSTEM_DelayMs(120);
-//						BK4819_stop_tones(true);
-					#endif
-					SYSTEM_DelayMs(30);
-
-					BK4819_send_MDC1200(MDC1200_OP_CODE_PTT_ID, 0x80, g_eeprom.config.setting.mdc1200_id, true);
-
-					#ifdef ENABLE_MDC1200_SIDE_BEEP
-						BK4819_start_tone(880, 10, true, true);
-						SYSTEM_DelayMs(120);
-						BK4819_stop_tones(true);
-					#endif
-				}
-				else
-			#endif
-				if (g_current_vfo->channel.dtmf_ptt_id_tx_mode == PTT_ID_APOLLO)
-				{
-					BK4819_start_tone(APOLLO_TONE1_HZ, 28, true, false);
-					SYSTEM_DelayMs(APOLLO_TONE_MS);
-					BK4819_stop_tones(true);
-				}
-			}
-
-			if (g_eeprom.config.setting.enable_scrambler)
-				BK4819_set_scrambler(g_current_vfo->channel.scrambler);
-			
+		case FUNCTION_INCOMING:
+		case FUNCTION_RECEIVE:
+		case FUNCTION_BAND_SCOPE:
+		default:
 			break;
 	}
 
-	g_power_save_pause_tick_10ms = power_save_pause_10ms;
-	g_power_save_pause_done      = false;
+	gBatterySaveCountdown_10ms = battery_save_count_10ms;
+	gSchedulePowerSave         = false;
 
-	#ifdef ENABLE_FMRADIO
-		g_fm_restore_tick_10ms = 0;
-	#endif
-
-	g_update_status = true;
+#if defined(ENABLE_FMRADIO)
+	gFM_RestoreCountdown_10ms = 0;
+#endif
 }
